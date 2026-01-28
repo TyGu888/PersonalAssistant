@@ -8,14 +8,22 @@ llm:
 data:
   dir: ./data  # 会创建 sessions.db 和 chroma/
 
+# Memory 配置
+memory:
+  max_context_messages: 20  # 上下文最大消息数（截断历史）
+
 # Channel 配置
 channels:
   cli:
-    enabled: true   # Phase 0 开发用
+    enabled: true   # CLI + Discord 同时启动
   telegram:
     enabled: false  # Phase 0 先关闭
     token: ${TELEGRAM_BOT_TOKEN}
-    allowed_users: ["123456789"]  # 白名单
+    allowed_users: ["968804902337912883"]  # 白名单
+  discord:
+    enabled: true
+    token: ${DISCORD_BOT_TOKEN}
+    allowed_users: ["968804902337912883"]  # 白名单
 
 # 路由规则（按顺序匹配，第一个匹配生效）
 routing:
@@ -23,9 +31,21 @@ routing:
     agent: study_coach
     tools: [scheduler_add, scheduler_list]
   
+  - match: {pattern: "搜索|查找|研究|调查|了解|访问|网页|抓取"}
+    agent: default
+    tools: [web_search, fetch_url, create_file, send_file]
+  
+  - match: {pattern: "执行|运行|命令|shell|git|npm|pip"}
+    agent: default
+    tools: [run_command]
+  
+  - match: {pattern: "创建|写入|读取|文件|目录|删除|追加|发送"}
+    agent: default
+    tools: [create_file, read_file, list_files, append_file, delete_file, send_file]
+  
   - match: {}  # 兜底
     agent: default
-    tools: []
+    tools: [web_search, run_command, create_file, read_file, list_files, send_file]
 
 # Agent 定义
 agents:

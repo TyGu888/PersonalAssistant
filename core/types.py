@@ -8,7 +8,7 @@ from enum import Enum
 @dataclass
 class IncomingMessage:
     """输入消息（所有 Channel 统一格式）"""
-    channel: str              # "telegram" | "wechat" | "cli"
+    channel: str              # "discord" | "telegram" | "wechat" | "cli"
     user_id: str              # 用户唯一标识
     text: str                 # 消息文本
     is_group: bool = False    # 是否群聊
@@ -16,11 +16,25 @@ class IncomingMessage:
     timestamp: datetime = field(default_factory=datetime.utcnow)
     attachments: list = field(default_factory=list)  # 附件路径
     raw: dict = field(default_factory=dict)          # 原始数据
+    reply_expected: bool = True  # 是否期望回复（群聊未被 @ 时为 False）
     
     def get_session_id(self) -> str:
-        """生成 Session Key（标准化）"""
+        """
+        生成 Session Key（标准化）
+        
+        Session ID 格式:
+        - 群聊: {channel}:group:{group_id}（按群记录所有消息）
+        - 私聊: {channel}:dm:{user_id}（按用户记录）
+        
+        设计原则:
+        - Session ID 必须全局唯一（考虑多 channel）
+        - 群聊按群记录，便于获取完整上下文
+        - 私聊按用户记录，保持对话连续性
+        """
         if self.is_group:
-            return f"{self.channel}:group:{self.group_id}:user:{self.user_id}"
+            # 群聊: 按群记录所有消息（去掉 user_id）
+            return f"{self.channel}:group:{self.group_id}"
+        # 私聊: 按用户记录
         return f"{self.channel}:dm:{self.user_id}"
 
 @dataclass

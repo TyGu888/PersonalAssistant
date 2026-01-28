@@ -10,6 +10,7 @@ from core.types import IncomingMessage, OutgoingMessage
 from channels.base import BaseChannel
 from channels.cli import CLIChannel
 from channels.telegram import TelegramChannel
+from channels.discord import DiscordChannel
 from agents.base import BaseAgent
 from agents.study_coach import StudyCoachAgent, DefaultAgent
 from memory.manager import MemoryManager
@@ -17,6 +18,9 @@ from tools.registry import registry
 
 # 导入 tools 以触发装饰器注册
 import tools.scheduler
+import tools.filesystem
+import tools.web
+import tools.shell
 
 
 class Engine:
@@ -90,6 +94,15 @@ class Engine:
                 allowed_users=tg_config.get("allowed_users", []),
                 on_message=self.handle
             )
+        
+        # Discord Channel
+        if channels_config.get("discord", {}).get("enabled", False):
+            discord_config = channels_config["discord"]
+            self.channels["discord"] = DiscordChannel(
+                token=discord_config.get("token", ""),
+                allowed_users=discord_config.get("allowed_users", []),
+                on_message=self.handle
+            )
     
     def _init_agents(self):
         """初始化 Agents"""
@@ -142,11 +155,14 @@ class Engine:
     def get_tool_context(self) -> dict:
         """
         获取 Tool 执行时需要的上下文（依赖注入）
+        
+        注意: pending_attachments 用于收集 Tool 执行过程中需要发送的文件
         """
         return {
             "engine": self,
             "scheduler": self.scheduler,
-            "memory": self.memory
+            "memory": self.memory,
+            "pending_attachments": []  # Tool 可以往这里添加要发送的文件路径
         }
     
     async def handle(self, msg: IncomingMessage) -> OutgoingMessage:
@@ -154,50 +170,62 @@ class Engine:
         处理消息（核心流程）:
         
         1. session_id = msg.get_session_id()
-        2. Router.resolve(msg) -> Route
-        3. 获取 Agent 实例
-        4. MemoryManager.get_context() -> 历史 + 相关记忆
-        5. tools = registry.get_schemas(route.tools)
-        6. response = Agent.run(msg.text, context, tools, self.get_tool_context())
-        7. MemoryManager.save() -> 保存对话
-        8. return OutgoingMessage(text=response)
+        2. 保存用户消息到 memory
+        3. 检查 reply_expected，如果为 False 则跳过 Agent 调用
+        4. Router.resolve(msg) -> Route
+        5. 获取 Agent 实例
+        6. MemoryManager.get_context() -> 历史 + 相关记忆
+        7. tools = registry.get_schemas(route.tools)
+        8. response = Agent.run(msg.text, context, tools, self.get_tool_context())
+        9. MemoryManager.save() -> 保存 assistant 回复
+        10. return OutgoingMessage(text=response)
         """
         try:
             # 1. 获取 session_id
             session_id = msg.get_session_id()
             
-            # 2. 路由
+            # 2. 先保存用户消息（群聊中记录所有消息，不仅是被 @ 的）
+            self.memory.save_message(session_id, "user", msg.text)
+            
+            # 3. 检查是否需要回复（群聊未被 @ 时不回复）
+            if not msg.reply_expected:
+                return OutgoingMessage(text="")
+            
+            # 4. 路由
             route = self.router.resolve(msg)
             
-            # 3. 获取 Agent
+            # 5. 获取 Agent
             agent = self.agents.get(route.agent_id)
             if agent is None:
                 agent = self.agents.get("default")
             
-            # 4. 获取上下文
+            # 6. 获取上下文（从配置读取 max_context_messages）
+            max_context_messages = self.config.get("memory", {}).get("max_context_messages", 20)
             context = await self.memory.get_context(
                 session_id=session_id,
                 query=msg.text,
-                user_id=msg.user_id
+                user_id=msg.user_id,
+                history_limit=max_context_messages
             )
             
-            # 5. 获取 Tool schemas
+            # 7. 获取 Tool schemas
             tools = registry.get_schemas(route.tools)
             
-            # 6. 运行 Agent
+            # 8. 运行 Agent（获取 tool_context 以便收集附件）
+            tool_context = self.get_tool_context()
             response = await agent.run(
                 user_text=msg.text,
                 context=context,
                 tools=tools,
-                tool_context=self.get_tool_context()
+                tool_context=tool_context
             )
             
-            # 7. 保存对话
-            self.memory.save_message(session_id, "user", msg.text)
+            # 9. 保存 assistant 回复
             self.memory.save_message(session_id, "assistant", response)
             
-            # 8. 返回响应
-            return OutgoingMessage(text=response)
+            # 10. 返回响应（包含 Tool 执行过程中收集的附件）
+            attachments = tool_context.get("pending_attachments", [])
+            return OutgoingMessage(text=response, attachments=attachments)
         
         except Exception as e:
             return OutgoingMessage(text=f"处理消息时发生错误: {str(e)}")

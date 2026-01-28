@@ -1,6 +1,17 @@
 import typer
 import asyncio
+import logging
+from dotenv import load_dotenv
 from core.engine import Engine
+
+# 自动加载 .env 文件中的环境变量
+load_dotenv()
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+)
 
 app = typer.Typer(help="Personal Agent Hub - 个人 AI 助手框架")
 
