@@ -973,3 +973,232 @@ data/
 ├── sessions.db     # SQLite: 对话历史
 └── chroma/         # ChromaDB: 向量记忆
 ```
+
+---
+
+## 8. 当前开发状态（2026-01-28）
+
+### 已完成功能
+
+| 模块 | 状态 | 说明 |
+|------|------|------|
+| `core/types.py` | ✅ 完成 | 共享类型定义 |
+| `core/router.py` | ✅ 完成 | 基于规则的消息路由 |
+| `core/engine.py` | ✅ 完成 | 主引擎，组装所有组件 |
+| `main.py` | ✅ 完成 | CLI 入口（typer） |
+| `config.yaml` | ✅ 完成 | 配置文件，支持环境变量 |
+| `channels/base.py` | ✅ 完成 | Channel 抽象基类 |
+| `channels/cli.py` | ✅ 完成 | CLI 交互 Channel |
+| `channels/telegram.py` | ✅ 完成 | Telegram Bot Channel |
+| `agents/base.py` | ✅ 完成 | Agent 基类，LLM 调用 + Tool 执行 |
+| `agents/study_coach.py` | ✅ 完成 | 学习教练 + 默认 Agent |
+| `tools/registry.py` | ✅ 完成 | Tool 注册系统（装饰器 + 依赖注入） |
+| `tools/scheduler.py` | ✅ 完成 | 定时提醒 Tool（APScheduler） |
+| `memory/session.py` | ✅ 完成 | 对话历史存储（SQLite） |
+| `memory/global_mem.py` | ✅ 完成 | 长期记忆（ChromaDB 向量搜索） |
+| `memory/manager.py` | ✅ 完成 | Memory 统一入口 + 记忆提取 |
+
+### 已验证功能
+
+- [x] CLI 模式对话
+- [x] 火山引擎 API 调用（OpenAI 兼容）
+- [x] 消息路由（关键词匹配）
+- [x] Tool 注册与执行（依赖注入）
+- [x] 对话历史保存（SQLite）
+- [x] 向量记忆搜索（ChromaDB）
+
+### 当前 LLM 配置
+
+使用字节火山引擎方舟平台（OpenAI 兼容 API）：
+
+```yaml
+llm:
+  api_key: ${ARK_API_KEY}
+  base_url: https://ark.cn-beijing.volces.com/api/v3
+  model: ep-20260128095801-jc4gx
+```
+
+### 当前路由规则
+
+```yaml
+routing:
+  - match: {pattern: "学习|复习|督促"}
+    agent: study_coach
+    tools: [scheduler_add, scheduler_list]
+  - match: {}  # 兜底
+    agent: default
+    tools: []
+```
+
+---
+
+## 9. 未来开发方向
+
+### 9.1 智能路由（Meta-Agent）
+
+**现状**：基于关键词/正则的规则匹配
+
+**目标**：用 LLM 动态决定路由
+
+```
+用户任务
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ Meta-Agent (Orchestrator)           │
+│ - 分析任务意图和复杂度               │
+│ - 决定使用哪个 Agent                │
+│ - 动态生成/调整 prompt              │
+│ - 决定分配哪些 tools                │
+└─────────────────────────────────────┘
+    │
+    ▼
+执行 Agent（动态配置）
+```
+
+**实现思路**：
+1. 创建 `OrchestratorAgent`
+2. 给它一个描述所有 Agent 能力的 prompt
+3. 让它输出 JSON 决定路由
+4. 在 `Router` 中增加 LLM 路由模式
+
+---
+
+### 9.2 动态 Prompt 生成
+
+**现状**：Agent 的 prompt 是静态配置的
+
+**目标**：根据任务类型、用户历史、当前上下文动态生成 prompt
+
+```python
+class DynamicPromptAgent(BaseAgent):
+    async def _generate_prompt(self, task_type: str, user_context: dict) -> str:
+        # 用 LLM 生成针对性 prompt
+        pass
+```
+
+---
+
+### 9.3 MCP 协议支持
+
+**现状**：自定义装饰器注册 Tool
+
+**目标**：支持 MCP (Model Context Protocol)，接入社区工具生态
+
+| 对比 | 当前实现 | MCP |
+|------|----------|-----|
+| 协议 | 自定义装饰器 | 标准化 JSON-RPC |
+| 工具发现 | 代码里写死 | 动态发现 |
+| 跨进程 | 不支持 | 支持（Server/Client） |
+| 生态 | 自己造轮子 | 可复用社区工具 |
+
+**实现思路**：
+1. 添加 `MCPClient` 类
+2. 在 `ToolRegistry` 中支持从 MCP Server 动态加载工具
+3. 兼容现有的装饰器注册方式
+
+```python
+# tools/mcp_client.py
+class MCPClient:
+    async def discover_tools(self, server_url: str) -> list[dict]:
+        """从 MCP Server 获取可用工具列表"""
+        pass
+    
+    async def call_tool(self, server_url: str, tool_name: str, args: dict) -> str:
+        """调用 MCP Server 上的工具"""
+        pass
+```
+
+---
+
+### 9.4 Agent 链（Multi-Agent 协作）
+
+**现状**：单个 Agent 处理任务
+
+**目标**：多个 Agent 协作完成复杂任务
+
+```
+用户: "帮我写一个 Python 爬虫并部署到服务器"
+         │
+         ▼
+    ┌─────────────┐
+    │ Planner     │ → 分解任务
+    └─────────────┘
+         │
+    ┌────┴────┐
+    ▼         ▼
+┌───────┐ ┌───────┐
+│ Coder │ │DevOps │ → 各自完成子任务
+└───────┘ └───────┘
+    │         │
+    └────┬────┘
+         ▼
+    ┌─────────────┐
+    │ Reviewer    │ → 检查整合
+    └─────────────┘
+```
+
+---
+
+### 9.5 Skill 系统（可导入/导出的 Agent 配置）
+
+**现状**：Agent 配置写在代码和 config.yaml 中
+
+**目标**：支持 Skill 文件格式，可分享、导入
+
+```yaml
+# skills/python_tutor.skill.yaml
+name: Python 教程助手
+version: 1.0
+author: xxx
+
+agent:
+  id: python_tutor
+  prompt: |
+    你是一个 Python 编程导师...
+
+tools:
+  - run_command
+  - create_file
+  - read_file
+
+routing:
+  pattern: "Python|编程|代码"
+```
+
+---
+
+### 9.6 更多 Tool 开发
+
+| Tool | 说明 | 优先级 |
+|------|------|--------|
+| `filesystem` | 文件/文件夹操作 | 高 |
+| `shell` | 执行 shell 命令 | 高 |
+| `web_search` | 网页搜索 | 中 |
+| `web_browse` | 浏览网页内容 | 中 |
+| `calendar` | 日历/日程管理 | 中 |
+| `email` | 邮件发送 | 低 |
+| `notion` | Notion API | 低 |
+
+---
+
+### 9.7 更多 Channel 开发
+
+| Channel | 说明 | 优先级 |
+|---------|------|--------|
+| Telegram | 已完成 | ✅ |
+| 微信 | 个人微信/企业微信 | 高 |
+| Web | HTTP API + 前端界面 | 中 |
+| Discord | Discord Bot | 低 |
+| Slack | Slack Bot | 低 |
+
+---
+
+## 10. 开发指南
+
+详见 `README.md`，包含：
+- 环境配置
+- 添加新 Tool 的步骤
+- 添加新 Agent 的步骤
+- 添加新 Channel 的步骤
+- 系统架构图
