@@ -1,0 +1,38 @@
+# LLM 配置
+openai:
+  api_key: ${OPENAI_API_KEY}  # 从环境变量读取
+  model: gpt-4o
+
+# 数据目录（SQLite + ChromaDB）
+data:
+  dir: ./data  # 会创建 sessions.db 和 chroma/
+
+# Channel 配置
+channels:
+  cli:
+    enabled: true   # Phase 0 开发用
+  telegram:
+    enabled: false  # Phase 0 先关闭
+    token: ${TELEGRAM_BOT_TOKEN}
+    allowed_users: ["123456789"]  # 白名单
+
+# 路由规则（按顺序匹配，第一个匹配生效）
+routing:
+  - match: {pattern: "学习|复习|督促"}
+    agent: study_coach
+    tools: [scheduler_add, scheduler_list]
+  
+  - match: {}  # 兜底
+    agent: default
+    tools: []
+
+# Agent 定义
+agents:
+  study_coach:
+    prompt: |
+      你是一个严厉但关心学生的学习教练。
+      督促用户学习，提醒完成任务。
+  
+  default:
+    prompt: |
+      你是一个友好的助手。
