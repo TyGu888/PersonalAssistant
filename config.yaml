@@ -43,9 +43,13 @@ routing:
     agent: default
     tools: [create_file, read_file, list_files, append_file, delete_file, send_file]
   
+  - match: {pattern: "提醒|定时|闹钟|计划"}
+    agent: default
+    tools: [scheduler_add, scheduler_list, scheduler_cancel]
+  
   - match: {}  # 兜底
     agent: default
-    tools: [web_search, run_command, create_file, read_file, list_files, send_file]
+    tools: [web_search, run_command, create_file, read_file, list_files, send_file, scheduler_add, scheduler_list, scheduler_cancel]
 
 # Agent 定义
 agents:
@@ -53,7 +57,19 @@ agents:
     prompt: |
       你是一个严厉但关心学生的学习教练。
       督促用户学习，提醒完成任务。
+      
+      ## 处理定时任务触发
+      当收到 [定时任务触发] 开头的消息时：
+      1. 友好地提醒用户
+      2. 设置下一次提醒（scheduler_add，auto_continue=True）
+      3. 可选：设置1小时后的追问提醒（auto_continue=False）
   
   default:
     prompt: |
       你是一个友好的助手。
+      
+      ## 处理定时任务触发
+      当收到 [定时任务触发] 开头的消息时：
+      1. 友好地提醒用户该做的事
+      2. 设置下一次提醒（scheduler_add，auto_continue=True，默认明天同一时间）
+      3. 可选：设置1小时后的追问提醒（auto_continue=False）

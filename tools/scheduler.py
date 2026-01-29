@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from dateutil import parser as date_parser
 import uuid
 from typing import Optional
+from core.types import IncomingMessage
 
 
 def parse_reminder_time(time_str: str) -> datetime:
@@ -72,12 +73,16 @@ def parse_reminder_time(time_str: str) -> datetime:
             "channel": {
                 "type": "string",
                 "description": "通过哪个渠道提醒"
+            },
+            "auto_continue": {
+                "type": "boolean",
+                "description": "是否为循环提醒。若为 True，触发时会唤醒 Agent 处理，Agent 可决定是否设置下一次提醒"
             }
         },
         "required": ["time", "content", "user_id", "channel"]
     }
 )
-async def scheduler_add(time: str, content: str, user_id: str, channel: str, context=None) -> str:
+async def scheduler_add(time: str, content: str, user_id: str, channel: str, auto_continue: bool = False, context=None) -> str:
     """
     添加定时任务（使用注入的 context）
     
@@ -109,13 +114,35 @@ async def scheduler_add(time: str, content: str, user_id: str, channel: str, con
     except ValueError as e:
         return f"错误: {str(e)}"
     
+    # 检查时间是否在过去
+    now = datetime.now()
+    if run_date <= now:
+        return f"错误: 提醒时间 {run_date.strftime('%Y-%m-%d %H:%M')} 已经过去了。当前时间是 {now.strftime('%Y-%m-%d %H:%M')}，请设置一个未来的时间。"
+    
     # 生成唯一 job_id
     job_id = f"reminder_{user_id}_{uuid.uuid4().hex[:8]}"
     
+    # 调试日志
+    print(f"[DEBUG] scheduler_add: user_id={user_id}, job_id={job_id}")
+    
     # 创建异步回调函数
-    async def job_callback():
+    # 注意：需要接受 kwargs 中的参数
+    async def job_callback(content=None, user_id=None, channel=None, auto_continue=False):
         try:
-            await engine.send_push(channel, user_id, f"⏰ 提醒: {content}")
+            if auto_continue:
+                # 循环提醒：构造系统消息，让 Agent 处理
+                system_msg = IncomingMessage(
+                    channel=channel,
+                    user_id=user_id,
+                    text=f"[定时任务触发] 内容：{content}。请提醒用户，并根据情况决定是否设置下一次提醒（使用 scheduler_add，记得设置 auto_continue=True）。"
+                )
+                print(f"[DEBUG] auto_continue 触发，调用 engine.handle()")
+                response = await engine.handle(system_msg)
+                # 发送 Agent 的回复给用户
+                await engine.send_push(channel, user_id, response.text)
+            else:
+                # 普通提醒：简单推送
+                await engine.send_push(channel, user_id, f"⏰ 提醒: {content}")
         except Exception as e:
             # 记录错误，但不抛出异常（避免影响 scheduler）
             print(f"提醒发送失败: {e}")
@@ -130,14 +157,16 @@ async def scheduler_add(time: str, content: str, user_id: str, channel: str, con
             kwargs={
                 'content': content,
                 'user_id': user_id,
-                'channel': channel
+                'channel': channel,
+                'auto_continue': auto_continue
             },
             replace_existing=True
         )
         
         # 格式化返回消息
         time_str = run_date.strftime("%Y-%m-%d %H:%M")
-        return f"已设置提醒：{time_str} - {content}"
+        mode = "循环提醒" if auto_continue else "单次提醒"
+        return f"已设置{mode}：{time_str} - {content}"
     except Exception as e:
         return f"错误: 添加定时任务失败 - {str(e)}"
 
@@ -175,11 +204,17 @@ async def scheduler_list(user_id: str, context=None) -> str:
         # 获取所有任务
         jobs = scheduler.get_jobs()
         
+        # 调试：打印所有 jobs
+        print(f"[DEBUG] scheduler_list called with user_id: {user_id}")
+        print(f"[DEBUG] All jobs in scheduler: {[job.id for job in jobs]}")
+        
         # 过滤出该用户的任务（job_id 格式为 reminder_{user_id}_{uuid}）
         user_jobs = []
         for job in jobs:
             if job.id and job.id.startswith(f"reminder_{user_id}_"):
                 user_jobs.append(job)
+        
+        print(f"[DEBUG] Filtered user_jobs: {[job.id for job in user_jobs]}")
         
         if not user_jobs:
             return f"用户 {user_id} 暂无定时提醒"
@@ -188,16 +223,16 @@ async def scheduler_list(user_id: str, context=None) -> str:
         lines = [f"用户 {user_id} 的定时提醒列表："]
         for i, job in enumerate(user_jobs, 1):
             run_date = job.next_run_time
+            content = job.kwargs.get('content', '未知内容')
+            auto_continue = job.kwargs.get('auto_continue', False)
+            job_id_short = job.id.split('_')[-1] if '_' in job.id else job.id
+            mode_tag = "[循环]" if auto_continue else "[单次]"
+            
             if run_date:
                 time_str = run_date.strftime("%Y-%m-%d %H:%M")
-                # 从 job 的 kwargs 中获取内容
-                content = job.kwargs.get('content', '未知内容')
-                job_id_short = job.id.split('_')[-1] if '_' in job.id else job.id
-                lines.append(f"{i}. [{job_id_short}] {time_str} - {content}")
+                lines.append(f"{i}. [{job_id_short}] {mode_tag} {time_str} - {content}")
             else:
-                content = job.kwargs.get('content', '未知内容')
-                job_id_short = job.id.split('_')[-1] if '_' in job.id else job.id
-                lines.append(f"{i}. [{job_id_short}] 时间未设置 - {content}")
+                lines.append(f"{i}. [{job_id_short}] {mode_tag} 时间未设置 - {content}")
         
         return "\n".join(lines)
     except Exception as e:

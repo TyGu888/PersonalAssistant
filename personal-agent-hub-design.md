@@ -1,6 +1,6 @@
 # Personal Agent Hub - 系统设计文档
 
-> 版本: 1.0 | 更新: 2026-01-27
+> 版本: 1.1 | 更新: 2026-01-29
 
 ---
 
@@ -72,14 +72,18 @@ personal_agent_hub/
 │   └── types.py            # 共享类型定义
 ├── channels/
 │   ├── base.py             # Channel 基类
-│   ├── cli.py              # CLI Channel（Phase 0 开发用）
-│   └── telegram.py         # Telegram 实现
+│   ├── cli.py              # CLI Channel（开发调试用）
+│   ├── telegram.py         # Telegram Bot
+│   └── discord.py          # Discord Bot
 ├── agents/
 │   ├── base.py             # Agent 基类
 │   └── study_coach.py      # 学习教练 Agent
 ├── tools/
 │   ├── registry.py         # Tool 注册与执行（依赖注入）
-│   └── scheduler.py        # 定时任务 Tool
+│   ├── scheduler.py        # 智能定时任务 Tool
+│   ├── filesystem.py       # 文件操作 Tool
+│   ├── shell.py            # Shell 命令 Tool
+│   └── web.py              # 网页搜索/抓取 Tool
 ├── memory/
 │   ├── session.py          # Session 存储（SQLite）
 │   ├── global_mem.py       # 全局记忆（ChromaDB）
@@ -94,9 +98,17 @@ personal_agent_hub/
 main.py
   └── core/engine.py
         ├── core/router.py
-        ├── channels/telegram.py ── channels/base.py
+        ├── channels/
+        │     ├── cli.py ─────────┐
+        │     ├── telegram.py ────┼── channels/base.py
+        │     └── discord.py ─────┘
         ├── agents/study_coach.py ── agents/base.py
-        ├── tools/registry.py
+        ├── tools/
+        │     ├── registry.py
+        │     ├── scheduler.py ── (依赖注入 engine, scheduler)
+        │     ├── filesystem.py
+        │     ├── shell.py
+        │     └── web.py
         └── memory/manager.py
               ├── memory/session.py
               └── memory/global_mem.py
@@ -629,15 +641,56 @@ registry = ToolRegistry()
 
 ---
 
-### 3.10 `tools/scheduler.py` - 定时任务 Tool
+### 3.10 `tools/scheduler.py` - 智能定时任务 Tool
 
-**职责**: 实现定时提醒功能
+**职责**: 实现智能定时提醒功能，支持自动续约
 
-**依赖**: `tools/registry.py`, `APScheduler` 库
+**依赖**: `tools/registry.py`, `APScheduler` 库, `dateutil` 库
 
-**Tools 定义**（使用依赖注入，无全局变量）:
+**核心特性**:
+- **单次提醒**: 触发时直接推送消息
+- **智能循环提醒** (`auto_continue=True`): 触发时唤醒 Agent 处理，Agent 可决定下次提醒时间
+
+**工作原理**:
+```
+单次提醒 (auto_continue=False)
+    │
+    ▼ 时间到
+直接推送 "⏰ 提醒: {content}"
+
+智能循环提醒 (auto_continue=True)
+    │
+    ▼ 时间到
+构造 IncomingMessage → Engine.handle()
+    │
+    ▼
+Agent 处理并决定:
+    1. 回复用户（提醒内容）
+    2. 设置下一次提醒（可选，自动续约）
+    3. 设置追问提醒（可选）
+```
+
+**关键实现细节**:
+
+1. **时间解析** (`parse_reminder_time`):
+   - 支持 `HH:MM` 格式（今天，如已过则自动设为明天）
+   - 支持 `YYYY-MM-DD HH:MM` 完整格式
+   - 使用 `dateutil.parser` 作为通用解析后备
+
+2. **Job ID 格式**: `reminder_{user_id}_{uuid8}`（便于按用户过滤）
+
+3. **错误处理**:
+   - context 为空检查
+   - 时间解析失败处理
+   - 过去时间检测并返回错误
+
+**Tools 定义**:
 ```python
 from tools.registry import registry
+from datetime import datetime, timedelta
+from dateutil import parser as date_parser
+import uuid
+from core.types import IncomingMessage
 
 @registry.register(
     name="scheduler_add",
@@ -660,29 +713,71 @@ from tools.registry import registry
             "channel": {
                 "type": "string",
                 "description": "通过哪个渠道提醒"
+            },
+            "auto_continue": {
+                "type": "boolean",
+                "description": "是否为循环提醒。若为 True，触发时会唤醒 Agent 处理，Agent 可决定是否设置下一次提醒"
             }
         },
         "required": ["time", "content", "user_id", "channel"]
     }
 )
-async def scheduler_add(time: str, content: str, user_id: str, channel: str, context=None) -> str:
+async def scheduler_add(time: str, content: str, user_id: str, channel: str, 
+                        auto_continue: bool = False, context=None) -> str:
     """
-    添加定时任务（使用注入的 context）
+    添加定时任务
     
-    context 包含:
-    - engine: Engine 实例（用于 send_push）
-    - scheduler: APScheduler 实例
+    流程:
+    1. 验证 context（engine, scheduler）
+    2. 解析时间，检查是否为未来时间
+    3. 生成唯一 job_id
+    4. 创建 job_callback（根据 auto_continue 决定行为）
+    5. 添加到 scheduler
     
-    返回: "已设置提醒：2026-01-28 10:00 - 复习 GRPO"
+    返回: "已设置循环提醒：2026-01-28 10:00 - 复习 GRPO" 或
+          "已设置单次提醒：2026-01-28 10:00 - 复习 GRPO"
     """
-    engine = context["engine"]
-    scheduler = context["scheduler"]
+    # 验证 context
+    if context is None:
+        return "错误: 缺少上下文信息"
+    engine = context.get("engine")
+    scheduler = context.get("scheduler")
     
-    async def job_callback():
-        await engine.send_push(channel, user_id, f"⏰ 提醒: {content}")
+    # 解析时间 & 检查是否过期
+    run_date = parse_reminder_time(time)
+    if run_date <= datetime.now():
+        return f"错误: 提醒时间已过去，请设置未来时间"
     
-    # scheduler.add_job(job_callback, 'date', run_date=parse_time(time))
-    pass
+    job_id = f"reminder_{user_id}_{uuid.uuid4().hex[:8]}"
+    
+    async def job_callback(content=None, user_id=None, channel=None, auto_continue=False):
+        try:
+            if auto_continue:
+                # 智能循环：构造系统消息，让 Agent 处理并决定下次提醒
+                system_msg = IncomingMessage(
+                    channel=channel,
+                    user_id=user_id,
+                    text=f"[定时任务触发] 内容：{content}。请提醒用户，并根据情况决定是否设置下一次提醒（使用 scheduler_add，记得设置 auto_continue=True）。"
+                )
+                response = await engine.handle(system_msg)
+                await engine.send_push(channel, user_id, response.text)
+            else:
+                # 简单推送
+                await engine.send_push(channel, user_id, f"⏰ 提醒: {content}")
+        except Exception as e:
+            print(f"提醒发送失败: {e}")
+    
+    scheduler.add_job(
+        job_callback,
+        'date',
+        run_date=run_date,
+        id=job_id,
+        kwargs={'content': content, 'user_id': user_id, 'channel': channel, 'auto_continue': auto_continue},
+        replace_existing=True
+    )
+    
+    mode = "循环提醒" if auto_continue else "单次提醒"
+    return f"已设置{mode}：{run_date.strftime('%Y-%m-%d %H:%M')} - {content}"
 
 @registry.register(
     name="scheduler_list",
@@ -690,13 +785,20 @@ async def scheduler_add(time: str, content: str, user_id: str, channel: str, con
     parameters={
         "type": "object",
         "properties": {
-            "user_id": {"type": "string"}
+            "user_id": {"type": "string", "description": "用户ID"}
         },
         "required": ["user_id"]
     }
 )
 async def scheduler_list(user_id: str, context=None) -> str:
-    """列出定时任务"""
+    """
+    列出定时任务（通过 job_id 前缀过滤用户任务）
+    
+    输出格式:
+    用户 {user_id} 的定时提醒列表：
+    1. [abc123] [循环] 2026-01-29 10:00 - 复习 GRPO
+    2. [def456] [单次] 2026-01-29 15:00 - 开会
+    """
     pass
 
 @registry.register(
@@ -711,8 +813,22 @@ async def scheduler_list(user_id: str, context=None) -> str:
     }
 )
 async def scheduler_cancel(job_id: str, context=None) -> str:
-    """取消任务"""
+    """取消任务，返回 "已取消提醒: {job_id}" """
     pass
+```
+
+**Agent Prompt 配置示例**（用于处理 auto_continue 触发）:
+```yaml
+agents:
+  study_coach:
+    prompt: |
+      你是一个严厉但关心学生的学习教练。
+      
+      ## 处理定时任务触发
+      当收到 [定时任务触发] 开头的消息时：
+      1. 友好地提醒用户
+      2. 设置下一次提醒（scheduler_add，auto_continue=True）
+      3. 可选：设置1小时后的追问提醒（auto_continue=False）
 ```
 
 ---
@@ -976,7 +1092,7 @@ data/
 
 ---
 
-## 8. 当前开发状态（2026-01-28）
+## 8. 当前开发状态（2026-01-29）
 
 ### 已完成功能
 
@@ -990,10 +1106,11 @@ data/
 | `channels/base.py` | ✅ 完成 | Channel 抽象基类 |
 | `channels/cli.py` | ✅ 完成 | CLI 交互 Channel |
 | `channels/telegram.py` | ✅ 完成 | Telegram Bot Channel |
+| `channels/discord.py` | ✅ 完成 | Discord Bot Channel |
 | `agents/base.py` | ✅ 完成 | Agent 基类，LLM 调用 + Tool 执行 |
 | `agents/study_coach.py` | ✅ 完成 | 学习教练 + 默认 Agent |
 | `tools/registry.py` | ✅ 完成 | Tool 注册系统（装饰器 + 依赖注入） |
-| `tools/scheduler.py` | ✅ 完成 | 定时提醒 Tool（APScheduler） |
+| `tools/scheduler.py` | ✅ 完成 | 智能定时提醒 Tool（APScheduler + 自动续约） |
 | `memory/session.py` | ✅ 完成 | 对话历史存储（SQLite） |
 | `memory/global_mem.py` | ✅ 完成 | 长期记忆（ChromaDB 向量搜索） |
 | `memory/manager.py` | ✅ 完成 | Memory 统一入口 + 记忆提取 |
@@ -1006,6 +1123,14 @@ data/
 - [x] Tool 注册与执行（依赖注入）
 - [x] 对话历史保存（SQLite）
 - [x] 向量记忆搜索（ChromaDB）
+- [x] 智能定时提醒（自动续约 + Agent 决策下次提醒）
+
+### 更新日志
+
+| 日期 | 版本 | 更新内容 |
+|------|------|----------|
+| 2026-01-29 | 1.1 | Scheduler 智能化：新增 `auto_continue` 参数，支持循环提醒自动唤醒 Agent 决定下次提醒时间；新增 Discord Channel |
+| 2026-01-28 | 1.0 | 初始版本，完成 Phase 0 核心功能 |
 
 ### 当前 LLM 配置
 
@@ -1025,9 +1150,26 @@ routing:
   - match: {pattern: "学习|复习|督促"}
     agent: study_coach
     tools: [scheduler_add, scheduler_list]
+  
+  - match: {pattern: "搜索|查找|研究|调查|了解|访问|网页|抓取"}
+    agent: default
+    tools: [web_search, fetch_url, create_file, send_file]
+  
+  - match: {pattern: "执行|运行|命令|shell|git|npm|pip"}
+    agent: default
+    tools: [run_command]
+  
+  - match: {pattern: "创建|写入|读取|文件|目录|删除|追加|发送"}
+    agent: default
+    tools: [create_file, read_file, list_files, append_file, delete_file, send_file]
+  
+  - match: {pattern: "提醒|定时|闹钟|计划"}
+    agent: default
+    tools: [scheduler_add, scheduler_list, scheduler_cancel]
+  
   - match: {}  # 兜底
     agent: default
-    tools: []
+    tools: [web_search, run_command, create_file, read_file, list_files, send_file, scheduler_add, scheduler_list, scheduler_cancel]
 ```
 
 ---
@@ -1170,27 +1312,29 @@ routing:
 
 ### 9.6 更多 Tool 开发
 
-| Tool | 说明 | 优先级 |
+| Tool | 说明 | 状态 |
 |------|------|--------|
-| `filesystem` | 文件/文件夹操作 | 高 |
-| `shell` | 执行 shell 命令 | 高 |
-| `web_search` | 网页搜索 | 中 |
-| `web_browse` | 浏览网页内容 | 中 |
-| `calendar` | 日历/日程管理 | 中 |
-| `email` | 邮件发送 | 低 |
-| `notion` | Notion API | 低 |
+| `scheduler` | 智能定时提醒（支持自动续约） | ✅ 已完成 |
+| `filesystem` | 文件/文件夹操作 | ✅ 已完成 |
+| `shell` | 执行 shell 命令 | ✅ 已完成 |
+| `web_search` | 网页搜索 | ✅ 已完成 |
+| `fetch_url` | 抓取网页内容 | ✅ 已完成 |
+| `calendar` | 日历/日程管理 | 待开发 |
+| `email` | 邮件发送 | 待开发 |
+| `notion` | Notion API | 待开发 |
 
 ---
 
 ### 9.7 更多 Channel 开发
 
-| Channel | 说明 | 优先级 |
+| Channel | 说明 | 状态 |
 |---------|------|--------|
-| Telegram | 已完成 | ✅ |
-| 微信 | 个人微信/企业微信 | 高 |
-| Web | HTTP API + 前端界面 | 中 |
-| Discord | Discord Bot | 低 |
-| Slack | Slack Bot | 低 |
+| CLI | 命令行交互 | ✅ 已完成 |
+| Telegram | Telegram Bot | ✅ 已完成 |
+| Discord | Discord Bot | ✅ 已完成 |
+| 微信 | 个人微信/企业微信 | 待开发 |
+| Web | HTTP API + 前端界面 | 待开发 |
+| Slack | Slack Bot | 待开发 |
 
 ---
 
