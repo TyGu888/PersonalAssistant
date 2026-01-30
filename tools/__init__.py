@@ -1,0 +1,7 @@
+# 导入所有 tool 模块以注册工具
+from tools import filesystem
+from tools import scheduler
+from tools import shell
+from tools import web
+from tools import image
+from tools import mcp_client

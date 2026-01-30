@@ -3,8 +3,12 @@ from memory.global_mem import GlobalMemory
 from core.types import ChatMessage
 from openai import AsyncOpenAI
 from typing import Optional
+from utils.token_counter import TokenCounter
 import json
+import logging
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 EXTRACT_MEMORIES_PROMPT = '''请从以下对话中提取用户的关键信息，每条信息一行。
@@ -28,7 +32,7 @@ EXTRACT_MEMORIES_PROMPT = '''请从以下对话中提取用户的关键信息，
 
 
 class MemoryManager:
-    def __init__(self, data_dir: str = "data", llm_config: dict = None):
+    def __init__(self, data_dir: str = "data", llm_config: dict = None, memory_config: dict = None):
         """
         初始化 SessionStore (SQLite) 和 GlobalMemory (ChromaDB)
         
@@ -37,9 +41,19 @@ class MemoryManager:
         - chroma/      (ChromaDB)
         
         llm_config: {"api_key": "...", "base_url": "...", "model": "..."}
+        memory_config: {"max_context_messages": 20, "max_context_tokens": 8000}
         """
         self.session = SessionStore(f"{data_dir}/sessions.db")
         self.global_mem = GlobalMemory(f"{data_dir}/chroma")
+        
+        # Memory 配置
+        memory_config = memory_config or {}
+        self.max_context_messages = memory_config.get("max_context_messages", 20)
+        self.max_context_tokens = memory_config.get("max_context_tokens")  # None 表示不启用 token 截断
+        
+        # Token 计数器
+        model = llm_config.get("model", "gpt-4o") if llm_config else "gpt-4o"
+        self.token_counter = TokenCounter(model)
         
         # 可选: LLM client 用于记忆提取
         if llm_config and llm_config.get("api_key"):
@@ -63,30 +77,96 @@ class MemoryManager:
         )
         self.session.append(session_id, message)
     
-    async def get_context(self, session_id: str, query: str, user_id: str, history_limit: int = 20, memory_limit: int = 5) -> dict:
+    def get_history(self, session_id: str, limit: int = 50) -> list[dict]:
         """
-        获取对话上下文
+        获取会话历史（供 HTTP API 使用）
+        
+        参数:
+        - session_id: 会话 ID
+        - limit: 最大消息数
+        
+        返回: 消息列表 [{"role": str, "content": str, "timestamp": str}, ...]
+        """
+        messages = self.session.get_recent(session_id, n=limit)
+        return [
+            {
+                "role": msg.role,
+                "content": msg.content,
+                "timestamp": msg.timestamp.isoformat() if msg.timestamp else ""
+            }
+            for msg in messages
+        ]
+    
+    def clear_session(self, session_id: str):
+        """
+        清空会话历史（供 HTTP API 使用）
+        
+        参数:
+        - session_id: 会话 ID
+        """
+        self.session.clear(session_id)
+    
+    async def get_context(
+        self, 
+        session_id: str, 
+        query: str, 
+        user_id: str, 
+        history_limit: int = None,
+        max_tokens: int = None,
+        memory_limit: int = 5
+    ) -> dict:
+        """
+        获取对话上下文（支持基于 Token 截断）
         
         输入:
         - session_id: Session ID
         - query: 当前用户消息（用于 RAG 搜索）
         - user_id: 用户 ID（用于搜索该用户的记忆）
-        - history_limit: 历史消息数量限制
+        - history_limit: 历史消息数量限制（可选，默认使用配置值）
+        - max_tokens: 历史消息的最大 token 数（可选，默认使用配置值）
         - memory_limit: 相关记忆数量限制
         
         输出:
         {
             "history": [ChatMessage, ...],
-            "memories": ["记忆1", "记忆2", ...]
+            "memories": ["记忆1", "记忆2", ...],
+            "token_count": int  # 历史消息的 token 数
         }
         
-        流程:
-        1. 从 SessionStore 获取最近历史
-        2. 从 GlobalMemory 搜索相关记忆
-        3. 返回组合结果
+        截断策略:
+        1. 如果指定 max_tokens 或配置了 max_context_tokens，按 token 数截断
+        2. 否则按条数截断（向后兼容）
+        3. 优先保留最近的消息
         """
-        # 获取最近历史消息
-        history = self.session.get_recent(session_id, n=history_limit)
+        # 使用传入的参数或配置值
+        effective_history_limit = history_limit or self.max_context_messages
+        effective_max_tokens = max_tokens or self.max_context_tokens
+        
+        # 获取历史消息（先获取足够多的消息，稍后截断）
+        # 如果要按 token 截断，先获取更多消息
+        fetch_limit = effective_history_limit * 2 if effective_max_tokens else effective_history_limit
+        history = self.session.get_recent(session_id, n=fetch_limit)
+        
+        # 计算原始 token 数
+        history_messages = [{"role": msg.role, "content": msg.content} for msg in history]
+        original_tokens = self.token_counter.count_messages(history_messages)
+        
+        # 按 token 截断（如果启用）
+        if effective_max_tokens and original_tokens > effective_max_tokens:
+            history = self._truncate_history_by_tokens(history, effective_max_tokens)
+            truncated_messages = [{"role": msg.role, "content": msg.content} for msg in history]
+            final_tokens = self.token_counter.count_messages(truncated_messages)
+            logger.info(
+                f"历史消息 token 截断: {original_tokens} -> {final_tokens} tokens, "
+                f"{len(history_messages)} -> {len(history)} 条消息"
+            )
+        else:
+            # 按条数截断
+            if len(history) > effective_history_limit:
+                history = history[-effective_history_limit:]
+            final_tokens = self.token_counter.count_messages(
+                [{"role": msg.role, "content": msg.content} for msg in history]
+            )
         
         # 搜索相关记忆
         memory_items = await self.global_mem.search(user_id, query, top_k=memory_limit)
@@ -96,8 +176,39 @@ class MemoryManager:
         
         return {
             "history": history,
-            "memories": memories
+            "memories": memories,
+            "token_count": final_tokens
         }
+    
+    def _truncate_history_by_tokens(self, history: list, max_tokens: int) -> list:
+        """
+        按 token 数截断历史消息，保留最近的消息
+        
+        参数:
+        - history: ChatMessage 列表（按时间顺序，最早在前）
+        - max_tokens: 最大 token 数
+        
+        返回: 截断后的历史消息列表
+        """
+        if not history:
+            return []
+        
+        # 从最近的消息开始累计
+        kept_messages = []
+        current_tokens = 3  # 基础开销
+        
+        for msg in reversed(history):
+            msg_dict = {"role": msg.role, "content": msg.content}
+            msg_tokens = self.token_counter.count_messages([msg_dict]) - 3  # 减去基础开销
+            
+            if current_tokens + msg_tokens <= max_tokens:
+                kept_messages.insert(0, msg)
+                current_tokens += msg_tokens
+            else:
+                # 超过限制，停止添加
+                break
+        
+        return kept_messages
     
     # ===== 记忆提取 =====
     

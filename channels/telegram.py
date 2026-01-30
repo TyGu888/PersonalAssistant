@@ -1,18 +1,30 @@
-from channels.base import BaseChannel, MessageHandler
-from core.types import IncomingMessage, OutgoingMessage
+import asyncio
+import logging
+from typing import Optional
+
 from telegram import Update
 from telegram.ext import Application, MessageHandler as TGMessageHandler, filters, ContextTypes
-from typing import Optional
-import logging
+
+from channels.base import BaseChannel, MessageHandler, ReconnectMixin
+from core.types import IncomingMessage, OutgoingMessage
 
 logger = logging.getLogger(__name__)
 
-class TelegramChannel(BaseChannel):
+
+class TelegramChannel(BaseChannel, ReconnectMixin):
     """
     Telegram Channel - Telegram Bot 实现
+    
+    支持自动重连，使用指数退避策略
     """
     
-    def __init__(self, token: str, allowed_users: list[str], on_message: MessageHandler):
+    def __init__(
+        self,
+        token: str,
+        allowed_users: list[str],
+        on_message: MessageHandler,
+        max_retries: Optional[int] = None
+    ):
         """
         初始化 Telegram Channel
         
@@ -20,39 +32,107 @@ class TelegramChannel(BaseChannel):
         - token: Telegram Bot Token
         - allowed_users: 允许的用户 ID 列表（白名单）
         - on_message: 消息处理回调
+        - max_retries: 最大重试次数，None 表示无限重试
         """
         super().__init__(on_message)
+        self.__init_reconnect__(max_retries)
         self.token = token
         self.allowed_users = set(allowed_users)  # 转为 set 提高查询效率
         self.application: Optional[Application] = None
     
     async def start(self):
         """
-        启动 Telegram Bot
+        启动 Telegram Bot（带重连循环）
+        
+        流程:
+        1. 进入重连循环
+        2. 创建 Application
+        3. 注册 message handler
+        4. 启动 polling
+        5. 如果崩溃，等待后重试
+        """
+        self.is_running = True
+        self._should_stop = False
+        
+        while not self._should_stop:
+            try:
+                await self._connect()
+                # 连接成功后重置重连状态
+                self._reset_reconnect_state()
+                logger.info("Telegram Bot started successfully")
+                
+                # 保持运行直到停止或出错
+                # polling 会在内部保持运行
+                while not self._should_stop and self.application:
+                    await asyncio.sleep(1)
+                
+                # 如果是正常停止，退出循环
+                if self._should_stop:
+                    break
+                    
+            except asyncio.CancelledError:
+                logger.info("Telegram Bot start cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Telegram Bot connection error: {e}", exc_info=True)
+                
+                # 清理当前连接
+                await self._cleanup()
+                
+                # 等待重连
+                if not await self._wait_for_reconnect("TelegramChannel"):
+                    logger.error("Telegram Bot max retries reached or stopped, giving up")
+                    break
+        
+        self.is_running = False
+        logger.info("Telegram Bot exited")
+    
+    async def _connect(self):
+        """
+        建立连接
         
         流程:
         1. 创建 Application
         2. 注册 message handler
         3. 启动 polling
         """
+        # 创建 Application
+        self.application = Application.builder().token(self.token).build()
+        
+        # 注册消息处理器（处理文本消息，排除命令）
+        self.application.add_handler(
+            TGMessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_telegram_message)
+        )
+        
+        # 初始化并启动 polling
+        await self.application.initialize()
+        await self.application.start()
+        await self.application.updater.start_polling()
+    
+    async def _cleanup(self):
+        """清理连接资源"""
         try:
-            # 创建 Application
-            self.application = Application.builder().token(self.token).build()
-            
-            # 注册消息处理器（处理文本消息，排除命令）
-            self.application.add_handler(
-                TGMessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_telegram_message)
-            )
-            
-            # 初始化并启动 polling
-            await self.application.initialize()
-            await self.application.start()
-            await self.application.updater.start_polling()
-            
-            logger.info("Telegram Bot started successfully")
+            if self.application:
+                try:
+                    if self.application.updater and self.application.updater.running:
+                        await self.application.updater.stop()
+                except Exception as e:
+                    logger.debug(f"Error stopping updater: {e}")
+                
+                try:
+                    if self.application.running:
+                        await self.application.stop()
+                except Exception as e:
+                    logger.debug(f"Error stopping application: {e}")
+                
+                try:
+                    await self.application.shutdown()
+                except Exception as e:
+                    logger.debug(f"Error shutting down application: {e}")
+                
+                self.application = None
         except Exception as e:
-            logger.error(f"Failed to start Telegram Bot: {e}", exc_info=True)
-            raise
+            logger.error(f"Error during cleanup: {e}", exc_info=True)
     
     async def _handle_telegram_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -148,16 +228,15 @@ class TelegramChannel(BaseChannel):
             raise
     
     async def stop(self):
-        """停止 Bot"""
+        """停止 Bot（会退出重连循环）"""
+        logger.info("Stopping Telegram Bot...")
+        self._should_stop = True
+        
         try:
-            if self.application:
-                # 停止 polling
-                await self.application.updater.stop()
-                # 停止 application
-                await self.application.stop()
-                # 关闭 application
-                await self.application.shutdown()
-                logger.info("Telegram Bot stopped successfully")
+            await self._cleanup()
+            logger.info("Telegram Bot stopped successfully")
         except Exception as e:
             logger.error(f"Error stopping Telegram Bot: {e}", exc_info=True)
             raise
+        finally:
+            self.is_running = False

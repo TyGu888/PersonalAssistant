@@ -2,76 +2,49 @@
 
 一个可扩展的个人 AI 助手框架，支持多渠道接入、多 Agent 人设、可插拔 Tools、长期记忆。
 
+## 特性
+
+- **多渠道接入**: CLI / Telegram / Discord / HTTP API
+- **多 Agent 人设**: 学习教练、编程助手、通用助手...
+- **可插拔 Tools**: 定时提醒、文件操作、Shell 执行、网页搜索、MCP 协议...
+- **长期记忆**: Session 历史 (SQLite) + RAG 向量搜索 (ChromaDB)
+- **Skills 系统**: Anthropic 风格的 Markdown 配置文件
+- **Token 管理**: tiktoken 精确计数，智能截断上下文
+- **多模态支持**: 图片处理与 Vision API 集成
+- **Docker 沙箱**: 容器隔离执行 Shell 命令
+- **进程解耦**: Gateway/Agent 分离，故障隔离
+
 ## 快速开始
 
 ### 1. 创建 Conda 环境
 
 ```bash
-# 创建新环境
 conda create -n agent-hub python=3.10 -y
-
-# 激活环境
 conda activate agent-hub
-
-# 安装依赖
 pip install -r requirements.txt
 ```
 
 ### 2. 配置环境变量
 
 ```bash
-# 设置火山引擎 API Key（必需）
-export ARK_API_KEY="your-ark-api-key-here"
+# 必需
+export ARK_API_KEY="your-ark-api-key"
 
-# 如果使用 Telegram，还需要设置（可选）
+# 可选（按需设置）
 export TELEGRAM_BOT_TOKEN="your-telegram-bot-token"
+export DISCORD_BOT_TOKEN="your-discord-bot-token"
+export HTTP_API_KEY="your-http-api-key"
 ```
 
 ### 3. 运行
 
-**CLI 模式（推荐先测试）**：
 ```bash
+# CLI 模式（推荐先测试）
 python main.py start
-```
 
-**单次对话测试**：
-```bash
+# 单次对话测试
 python main.py chat "你好"
 python main.py chat "我想学习 Python" --agent study_coach
-```
-
-## 配置说明
-
-配置文件 `config.yaml`：
-
-```yaml
-# LLM 配置（火山引擎方舟）
-llm:
-  api_key: ${ARK_API_KEY}  # 从环境变量读取
-  base_url: https://ark.cn-beijing.volces.com/api/v3
-  model: ep-20260128095801-jc4gx  # 火山引擎模型端点
-
-# 数据目录
-data:
-  dir: ./data
-
-# Channel 配置
-channels:
-  cli:
-    enabled: true   # CLI 模式
-  telegram:
-    enabled: false  # Telegram 需要设置 token
-    token: ${TELEGRAM_BOT_TOKEN}
-    allowed_users: ["your-telegram-user-id"]
-
-# 路由规则
-routing:
-  - match: {pattern: "学习|复习|督促"}
-    agent: study_coach
-    tools: [scheduler_add, scheduler_list]
-  - match: {}  # 兜底
-    agent: default
-    tools: []
 ```
 
 ## 项目结构
@@ -81,181 +54,89 @@ personal_agent_hub/
 ├── main.py                 # CLI 入口
 ├── config.yaml             # 配置文件
 ├── core/
-│   ├── engine.py           # 主引擎
+│   ├── engine.py           # 主引擎（支持进程解耦）
 │   ├── router.py           # 消息路由
 │   └── types.py            # 共享类型
 ├── channels/
-│   ├── base.py             # Channel 基类
+│   ├── base.py             # Channel 基类（含自动重连）
 │   ├── cli.py              # CLI 交互
-│   └── telegram.py         # Telegram Bot
+│   ├── telegram.py         # Telegram Bot
+│   ├── discord.py          # Discord Bot
+│   └── http.py             # HTTP API (FastAPI)
 ├── agents/
-│   ├── base.py             # Agent 基类
+│   ├── base.py             # Agent 基类（Token 管理 + 多模态）
 │   └── study_coach.py      # 学习教练
 ├── tools/
-│   ├── registry.py         # Tool 注册
-│   └── scheduler.py        # 定时提醒
+│   ├── registry.py         # Tool 注册（支持 MCP）
+│   ├── scheduler.py        # 定时提醒
+│   ├── filesystem.py       # 文件操作
+│   ├── shell.py            # Shell 执行（含持久化会话）
+│   ├── web.py              # 网页搜索/抓取
+│   ├── image.py            # 图片处理
+│   ├── sandbox.py          # Docker 沙箱
+│   └── mcp_client.py       # MCP 协议客户端
+├── skills/                 # Skills 配置目录
+│   ├── loader.py           # Skill 加载器
+│   ├── study_coach/SKILL.md
+│   ├── default/SKILL.md
+│   └── coding_assistant/SKILL.md
+├── worker/                 # 进程解耦
+│   ├── agent_worker.py     # Agent Worker 进程
+│   ├── agent_client.py     # Gateway 端客户端
+│   ├── pool.py             # Worker 进程池
+│   └── protocol.py         # 通信协议
+├── utils/
+│   └── token_counter.py    # Token 计数器
 ├── memory/
 │   ├── session.py          # 对话历史 (SQLite)
 │   ├── global_mem.py       # 长期记忆 (ChromaDB)
 │   └── manager.py          # Memory 管理
+├── Dockerfile.sandbox      # 沙箱镜像
 └── data/                   # 数据目录（自动创建）
-    ├── sessions.db         # SQLite 数据库
-    └── chroma/             # ChromaDB 向量库
 ```
 
-## 扩展开发
+## 配置说明
 
-### 添加新 Tool（让 Agent 能操作电脑/调用 API 等）
+配置文件 `config.yaml` 主要配置项：
 
-**步骤**：
-1. 在 `tools/` 目录创建新文件
-2. 使用 `@registry.register` 装饰器注册
-3. 在 `core/engine.py` 中 import 该文件（触发装饰器）
-4. 在 `config.yaml` 的路由规则中添加 tool 名称
-
-**示例：文件系统操作 Tool**
-
-```python
-# tools/filesystem.py
-from tools.registry import registry
-import os
-import subprocess
-
-@registry.register(
-    name="create_folder",
-    description="创建文件夹",
-    parameters={
-        "type": "object",
-        "properties": {
-            "path": {"type": "string", "description": "文件夹路径"}
-        },
-        "required": ["path"]
-    }
-)
-async def create_folder(path: str, context=None) -> str:
-    os.makedirs(path, exist_ok=True)
-    return f"已创建文件夹: {path}"
-
-@registry.register(
-    name="run_command",
-    description="执行 shell 命令",
-    parameters={
-        "type": "object",
-        "properties": {
-            "command": {"type": "string", "description": "要执行的命令"}
-        },
-        "required": ["command"]
-    }
-)
-async def run_command(command: str, context=None) -> str:
-    result = subprocess.run(command, shell=True, capture_output=True, text=True)
-    return result.stdout or result.stderr or "命令执行完成"
-```
-
-**在 engine.py 中注册**：
-```python
-# core/engine.py 顶部添加
-import tools.filesystem  # 触发装饰器注册
-```
-
-**在 config.yaml 中启用**：
 ```yaml
-routing:
-  - match: {pattern: "创建|文件|命令|执行"}
-    agent: default
-    tools: [create_folder, run_command]
+# LLM 配置
+llm:
+  api_key: ${ARK_API_KEY}
+  base_url: https://ark.cn-beijing.volces.com/api/v3
+  model: ep-20260128095801-jc4gx
+  max_context_tokens: 8000    # Token 限制
+
+# 进程模式
+engine:
+  process_mode: "embedded"    # "embedded" 或 "separated"
+  num_workers: 2              # Worker 进程数
+
+# Channel 配置
+channels:
+  cli:
+    enabled: true
+  telegram:
+    enabled: false
+    token: ${TELEGRAM_BOT_TOKEN}
+  discord:
+    enabled: false
+    token: ${DISCORD_BOT_TOKEN}
+  http:
+    enabled: false
+    port: 8080
+    api_key: ${HTTP_API_KEY}
+
+# Docker 沙箱
+sandbox:
+  enabled: false
+  image: "personalassistant-sandbox:latest"
+
+# MCP 协议
+mcp:
+  enabled: false
+  servers: []
 ```
-
----
-
-### 添加新 Agent
-
-**步骤**：
-1. 在 `agents/` 目录创建新文件，继承 `BaseAgent`
-2. 在 `core/engine.py` 的 `_init_agents()` 中初始化
-3. 在 `config.yaml` 的路由规则中使用
-
-```python
-# agents/coder.py
-from agents.base import BaseAgent
-
-class CoderAgent(BaseAgent):
-    DEFAULT_PROMPT = """你是一个编程助手，帮助用户写代码、调试问题。
-你可以使用工具来创建文件、执行命令。"""
-    
-    def __init__(self, llm_config: dict, custom_prompt: str = None):
-        prompt = custom_prompt or self.DEFAULT_PROMPT
-        super().__init__("coder", prompt, llm_config)
-```
-
----
-
-### 添加新 Channel
-
-**步骤**：
-1. 在 `channels/` 目录创建新文件，继承 `BaseChannel`
-2. 实现 `start()`, `send()`, `stop()` 方法
-3. 在 `core/engine.py` 的 `_init_channels()` 中初始化
-4. 在 `config.yaml` 中添加配置
-
-```python
-# channels/webhook.py
-from channels.base import BaseChannel, MessageHandler
-from core.types import IncomingMessage, OutgoingMessage
-import aiohttp
-
-class WebhookChannel(BaseChannel):
-    """Webhook Channel - 接收/发送 HTTP 请求"""
-    
-    def __init__(self, webhook_url: str, on_message: MessageHandler):
-        super().__init__(on_message)
-        self.webhook_url = webhook_url
-    
-    async def start(self):
-        # 启动 HTTP 服务器监听
-        pass
-    
-    async def send(self, user_id: str, message: OutgoingMessage):
-        async with aiohttp.ClientSession() as session:
-            await session.post(self.webhook_url, json={"text": message.text})
-    
-    async def stop(self):
-        pass
-```
-
----
-
-### 定时任务
-
-**方式 1：通过对话让 Agent 设置**
-```
-You: 每天早上 9 点提醒我学习
-Agent: 好的，已设置提醒（调用 scheduler_add tool）
-```
-
-**方式 2：系统启动时自动添加**
-```python
-# 在 engine.py 的 run() 方法中添加
-async def run(self):
-    self._init_channels()
-    self._init_agents()
-    self.scheduler.start()
-    
-    # 添加启动时的定时任务
-    self.scheduler.add_job(
-        self._daily_greeting,
-        'cron',
-        hour=9,
-        minute=0
-    )
-    
-    # ...
-
-async def _daily_greeting(self):
-    await self.send_push("cli", "cli_user", "早上好！今天要学习什么？")
-```
-
----
 
 ## 系统架构
 
@@ -263,16 +144,16 @@ async def _daily_greeting(self):
 用户消息
     │
     ▼
-Channel (CLI/Telegram/...)
+Channel (CLI/Telegram/Discord/HTTP)
     │
     ▼ IncomingMessage
 Engine.handle()
-    ├── Router.resolve() ──────────► 选择 Agent + 允许的 Tools
-    ├── MemoryManager.get_context() ► 获取历史 + 相关记忆 (ChromaDB)
-    ├── Agent.run() ───────────────► 调用 LLM + 执行 Tool
-    │       │
+    ├── Router.resolve() ──────────► 选择 Agent + Tools
+    ├── MemoryManager.get_context() ► 获取历史 + 记忆 (Token 截断)
+    ├── Agent.run() ───────────────► LLM 调用 + Tool 执行
+    │       │                         (可在 Worker 进程中执行)
     │       ├── LLM 决定调用 Tool
-    │       ├── registry.execute() ► 执行 Tool（注入 context）
+    │       ├── registry.execute() ► 执行 Tool (支持 MCP/沙箱)
     │       └── LLM 生成最终回复
     │
     └── MemoryManager.save() ──────► 保存对话 (SQLite)
@@ -281,22 +162,117 @@ Engine.handle()
 Channel.send() ► 返回给用户
 ```
 
+### 进程解耦模式
+
+```
+Gateway 进程                    Worker 进程 (×N)
+├── Engine                      ├── AgentWorker
+├── Channels                    ├── BaseAgent
+├── Scheduler                   ├── ToolRegistry
+└── AgentClient ──Pipe(IPC)──► └── MemoryManager
+```
+
+## 扩展开发
+
+### 添加新 Skill（推荐）
+
+在 `skills/` 目录下创建 `{skill_name}/SKILL.md`：
+
+```markdown
+---
+name: my_skill
+description: 技能描述
+metadata:
+  emoji: "🎯"
+  requires:
+    tools: ["tool1", "tool2"]
 ---
 
-## 关键文件
+# 角色定义
 
-| 文件 | 职责 | 修改场景 |
-|------|------|----------|
-| `config.yaml` | 配置 LLM、路由、Agent prompt | 调整模型、添加路由规则 |
-| `core/engine.py` | 主引擎，组装所有组件 | 添加新 Channel/Agent 初始化 |
-| `core/router.py` | 消息路由 | 修改路由逻辑 |
-| `tools/registry.py` | Tool 注册系统 | 一般不需要修改 |
-| `tools/*.py` | 具体 Tool 实现 | 添加新能力 |
-| `agents/base.py` | Agent 基类，LLM 调用 | 修改 LLM 调用逻辑 |
-| `agents/*.py` | 具体 Agent 实现 | 添加新人设 |
-| `channels/base.py` | Channel 基类 | 一般不需要修改 |
-| `channels/*.py` | 具体 Channel 实现 | 添加新渠道 |
-| `memory/manager.py` | 记忆管理 | 修改记忆策略 |
+你是一个...
+
+## 核心职责
+
+- 职责 1
+- 职责 2
+
+## 交互风格
+
+语气要...
+```
+
+### 添加新 Tool
+
+```python
+# tools/my_tool.py
+from tools.registry import registry
+
+@registry.register(
+    name="my_tool",
+    description="工具描述",
+    parameters={
+        "type": "object",
+        "properties": {
+            "arg1": {"type": "string", "description": "参数1"}
+        },
+        "required": ["arg1"]
+    }
+)
+async def my_tool(arg1: str, context=None) -> str:
+    engine = context["engine"]  # 依赖注入
+    return "结果"
+```
+
+### 添加新 Channel
+
+继承 `BaseChannel`，实现 `start()`, `send()`, `stop()` 方法。
+Channel 已内置自动重连机制（指数退避 5s → 300s）。
+
+## HTTP API
+
+启用 `channels.http.enabled: true` 后可用：
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/chat` | POST | 发送消息 |
+| `/health` | GET | 健康检查 |
+| `/agents` | GET | 列出 Agents |
+| `/tools` | GET | 列出 Tools |
+| `/sessions/{id}` | GET/DELETE | 会话管理 |
+
+```bash
+curl -X POST http://localhost:8080/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-key" \
+  -d '{"text": "你好", "user_id": "user123"}'
+```
+
+## Docker 沙箱
+
+1. 构建沙箱镜像：
+```bash
+docker build -t personalassistant-sandbox:latest -f Dockerfile.sandbox .
+```
+
+2. 启用沙箱：
+```yaml
+sandbox:
+  enabled: true
+```
+
+## MCP 协议
+
+连接外部 MCP Server 复用社区工具：
+
+```yaml
+mcp:
+  enabled: true
+  servers:
+    - name: filesystem
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "./data/workspace"]
+```
 
 ## License
 

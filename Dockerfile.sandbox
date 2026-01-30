@@ -1,0 +1,62 @@
+# Docker 沙箱镜像
+# 用于隔离执行命令，保护宿主机安全
+#
+# 构建命令:
+#   docker build -t personalassistant-sandbox:latest -f Dockerfile.sandbox .
+#
+# 特性:
+# - 基于 Python 3.10 slim 镜像
+# - 非 root 用户运行
+# - 安装常用开发工具
+# - 最小化镜像大小
+
+FROM python:3.10-slim
+
+# 设置环境变量
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV HOME=/home/sandbox
+
+# 安装基础工具
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    curl \
+    wget \
+    git \
+    jq \
+    ripgrep \
+    tree \
+    vim-tiny \
+    less \
+    unzip \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# 安装常用 Python 包
+RUN pip install --no-cache-dir \
+    requests \
+    httpx \
+    pyyaml \
+    python-dotenv \
+    && pip cache purge
+
+# 创建非 root 用户
+RUN useradd -m -s /bin/bash -u 1000 sandbox \
+    && mkdir -p /workspace \
+    && chown -R sandbox:sandbox /workspace /home/sandbox
+
+# 设置工作目录
+WORKDIR /workspace
+
+# 切换到非 root 用户
+USER sandbox
+
+# 配置 bash
+RUN echo 'alias ll="ls -la"' >> ~/.bashrc \
+    && echo 'alias la="ls -A"' >> ~/.bashrc \
+    && echo 'export PS1="\u@sandbox:\w\$ "' >> ~/.bashrc
+
+# 默认命令（保持容器运行）
+CMD ["sleep", "infinity"]

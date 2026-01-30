@@ -1,18 +1,29 @@
-from channels.base import BaseChannel, MessageHandler
-from core.types import IncomingMessage, OutgoingMessage
-import discord
-from typing import Optional, Union
+import asyncio
 import logging
+from typing import Optional, Union
+
+import discord
+
+from channels.base import BaseChannel, MessageHandler, ReconnectMixin
+from core.types import IncomingMessage, OutgoingMessage
 
 logger = logging.getLogger(__name__)
 
 
-class DiscordChannel(BaseChannel):
+class DiscordChannel(BaseChannel, ReconnectMixin):
     """
     Discord Channel - Discord Bot 实现
+    
+    支持自动重连，使用指数退避策略
     """
     
-    def __init__(self, token: str, allowed_users: list[str], on_message: MessageHandler):
+    def __init__(
+        self,
+        token: str,
+        allowed_users: list[str],
+        on_message: MessageHandler,
+        max_retries: Optional[int] = None
+    ):
         """
         初始化 Discord Channel
         
@@ -20,17 +31,22 @@ class DiscordChannel(BaseChannel):
         - token: Discord Bot Token
         - allowed_users: 允许的用户 ID 列表（白名单）
         - on_message: 消息处理回调
+        - max_retries: 最大重试次数，None 表示无限重试
         """
         super().__init__(on_message)
+        self.__init_reconnect__(max_retries)
         self.token = token
         self.allowed_users = set(allowed_users)  # 转为 set 提高查询效率
-        
+        self.client: Optional[discord.Client] = None
+    
+    def _create_client(self):
+        """创建并配置 Discord Client"""
         # 设置 Intents（需要启用 message_content）
         intents = discord.Intents.default()
         intents.message_content = True
         
         # 创建 Discord Client
-        self.client: Optional[discord.Client] = discord.Client(intents=intents)
+        self.client = discord.Client(intents=intents)
         
         # 注册消息事件处理器（使用闭包保持正确的函数名）
         @self.client.event
@@ -43,21 +59,64 @@ class DiscordChannel(BaseChannel):
     
     async def start(self):
         """
-        启动 Discord Bot
+        启动 Discord Bot（带重连循环）
         
         流程:
-        1. 使用 token 登录并启动
+        1. 进入重连循环
+        2. 创建 Client
+        3. 使用 token 登录并启动
+        4. 如果崩溃，等待后重试
         """
-        try:
-            await self.client.start(self.token)
-            logger.info("Discord Bot started successfully")
-        except Exception as e:
-            logger.error(f"Failed to start Discord Bot: {e}", exc_info=True)
-            raise
+        self.is_running = True
+        self._should_stop = False
+        
+        while not self._should_stop:
+            try:
+                # 每次重连时创建新的 client
+                self._create_client()
+                
+                # 连接成功后重置重连状态（在 on_ready 中会确认连接成功）
+                await self.client.start(self.token)
+                
+                # client.start() 返回意味着连接已断开
+                logger.warning("Discord Bot disconnected")
+                
+                # 如果是正常停止，退出循环
+                if self._should_stop:
+                    break
+                    
+            except asyncio.CancelledError:
+                logger.info("Discord Bot start cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Discord Bot connection error: {e}", exc_info=True)
+                
+                # 清理当前连接
+                await self._cleanup()
+                
+                # 等待重连
+                if not await self._wait_for_reconnect("DiscordChannel"):
+                    logger.error("Discord Bot max retries reached or stopped, giving up")
+                    break
+        
+        self.is_running = False
+        logger.info("Discord Bot exited")
     
     async def _on_ready(self):
         """Bot 就绪时的回调"""
+        # 连接成功，重置重连状态
+        self._reset_reconnect_state()
         logger.info(f"Discord Bot logged in as {self.client.user}")
+    
+    async def _cleanup(self):
+        """清理连接资源"""
+        try:
+            if self.client and not self.client.is_closed():
+                await self.client.close()
+        except Exception as e:
+            logger.debug(f"Error closing client: {e}")
+        finally:
+            self.client = None
     
     async def _on_message(self, message: discord.Message):
         """
@@ -267,11 +326,15 @@ class DiscordChannel(BaseChannel):
             raise
     
     async def stop(self):
-        """停止 Bot"""
+        """停止 Bot（会退出重连循环）"""
+        logger.info("Stopping Discord Bot...")
+        self._should_stop = True
+        
         try:
-            if self.client:
-                await self.client.close()
-                logger.info("Discord Bot stopped successfully")
+            await self._cleanup()
+            logger.info("Discord Bot stopped successfully")
         except Exception as e:
             logger.error(f"Error stopping Discord Bot: {e}", exc_info=True)
             raise
+        finally:
+            self.is_running = False

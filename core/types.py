@@ -14,7 +14,8 @@ class IncomingMessage:
     is_group: bool = False    # 是否群聊
     group_id: Optional[str] = None  # 群 ID（群聊时必填）
     timestamp: datetime = field(default_factory=datetime.utcnow)
-    attachments: list = field(default_factory=list)  # 附件路径
+    attachments: list = field(default_factory=list)  # 附件路径（非图片文件）
+    images: list[str] = field(default_factory=list)  # 图片路径或 base64 data URL
     raw: dict = field(default_factory=dict)          # 原始数据
     reply_expected: bool = True  # 是否期望回复（群聊未被 @ 时为 False）
     

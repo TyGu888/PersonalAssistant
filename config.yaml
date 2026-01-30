@@ -3,14 +3,38 @@ llm:
   api_key: ${ARK_API_KEY}  # 从环境变量读取
   base_url: https://ark.cn-beijing.volces.com/api/v3
   model: ep-20260128095801-jc4gx  # 火山引擎模型端点
+  max_context_tokens: 8000  # Agent 上下文最大 token 数（留出响应空间）
+  max_response_tokens: 4096  # 可选：限制响应长度
+
+# Engine 配置
+engine:
+  # 进程模式:
+  # - "embedded": 内嵌模式，Agent 在主进程中运行（默认，适合开发调试）
+  # - "separated": 分离模式，Agent 在独立 Worker 进程中运行（适合生产环境）
+  process_mode: "embedded"
+  # Worker 进程数量（仅分离模式时有效）
+  num_workers: 2
 
 # 数据目录（SQLite + ChromaDB）
 data:
   dir: ./data  # 会创建 sessions.db 和 chroma/
 
+# Skills 配置
+skills:
+  dir: ./skills  # Skills 目录路径
+  # 可选：覆盖特定 skill 的配置
+  overrides:
+    study_coach:
+      enabled: true
+    default:
+      enabled: true
+    coding_assistant:
+      enabled: true
+
 # Memory 配置
 memory:
-  max_context_messages: 20  # 上下文最大消息数（截断历史）
+  max_context_messages: 20  # 上下文最大消息数（向后兼容，按条数截断）
+  max_context_tokens: 8000  # 新增：按 token 截断（优先于条数截断）
 
 # Channel 配置
 channels:
@@ -24,6 +48,11 @@ channels:
     enabled: true
     token: ${DISCORD_BOT_TOKEN}
     allowed_users: ["968804902337912883"]  # 白名单
+  http:
+    enabled: false  # HTTP API 默认关闭
+    host: "0.0.0.0"
+    port: 8080
+    api_key: ${HTTP_API_KEY}  # 可选：API Key 认证，为空则不验证
 
 # 路由规则（按顺序匹配，第一个匹配生效）
 routing:
@@ -35,9 +64,9 @@ routing:
     agent: default
     tools: [web_search, fetch_url, create_file, send_file]
   
-  - match: {pattern: "执行|运行|命令|shell|git|npm|pip"}
+  - match: {pattern: "执行|运行|命令|shell|git|npm|pip|沙箱|sandbox|容器|docker"}
     agent: default
-    tools: [run_command]
+    tools: [run_command, sandbox_start, sandbox_exec, sandbox_stop, sandbox_copy_to, sandbox_copy_from, sandbox_status]
   
   - match: {pattern: "创建|写入|读取|文件|目录|删除|追加|发送"}
     agent: default
@@ -49,7 +78,41 @@ routing:
   
   - match: {}  # 兜底
     agent: default
-    tools: [web_search, run_command, create_file, read_file, list_files, send_file, scheduler_add, scheduler_list, scheduler_cancel]
+    # 可添加 mcp:* 启用所有 MCP 工具，或 mcp:server_name:* 启用特定 server 的工具
+    tools: [web_search, run_command, create_file, read_file, list_files, send_file, scheduler_add, scheduler_list, scheduler_cancel, sandbox_start, sandbox_exec, sandbox_stop, sandbox_status]
+
+# Docker 沙箱配置
+sandbox:
+  enabled: false  # 默认关闭，启用后 shell 命令将在容器中执行
+  image: "personalassistant-sandbox:latest"  # 沙箱镜像
+  memory_limit: "512m"  # 内存限制
+  cpu_limit: 1.0  # CPU 限制（核数）
+  network: "none"  # 网络模式: "none"(无网络) 或 "bridge"(桥接)
+  workspace_mount: "./data/workspace"  # 工作目录挂载路径
+
+# MCP (Model Context Protocol) 配置
+# 连接外部 MCP Server 复用社区工具
+mcp:
+  enabled: false  # 默认关闭，启用后加载 MCP Servers
+  servers:
+    # 示例: 文件系统 Server
+    # - name: filesystem
+    #   command: npx
+    #   args: ["-y", "@modelcontextprotocol/server-filesystem", "./data/workspace"]
+    
+    # 示例: GitHub Server
+    # - name: github
+    #   command: npx
+    #   args: ["-y", "@modelcontextprotocol/server-github"]
+    #   env:
+    #     GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_TOKEN}
+    
+    # 示例: Brave Search Server
+    # - name: brave-search
+    #   command: npx
+    #   args: ["-y", "@modelcontextprotocol/server-brave-search"]
+    #   env:
+    #     BRAVE_API_KEY: ${BRAVE_API_KEY}
 
 # Agent 定义
 agents:
