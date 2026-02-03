@@ -3,15 +3,15 @@ llm:
   api_key: ${ARK_API_KEY}  # 从环境变量读取
   base_url: https://ark.cn-beijing.volces.com/api/v3
   model: ep-20260128095801-jc4gx  # 火山引擎模型端点
-  max_context_tokens: 8000  # Agent 上下文最大 token 数（留出响应空间）
-  max_response_tokens: 4096  # 可选：限制响应长度
+  max_context_tokens: 16000  # Agent 上下文最大 token 数（留出响应空间）
+  max_response_tokens: 8192  # 可选：限制响应长度
 
 # Engine 配置
 engine:
   # 进程模式:
   # - "embedded": 内嵌模式，Agent 在主进程中运行（默认，适合开发调试）
   # - "separated": 分离模式，Agent 在独立 Worker 进程中运行（适合生产环境）
-  process_mode: "embedded"
+  process_mode: "separated"
   # Worker 进程数量（仅分离模式时有效）
   num_workers: 2
 
@@ -33,13 +33,13 @@ skills:
 
 # Memory 配置
 memory:
-  max_context_messages: 20  # 上下文最大消息数（向后兼容，按条数截断）
-  max_context_tokens: 8000  # 新增：按 token 截断（优先于条数截断）
+  max_context_messages: 50  # 上下文最大消息数（向后兼容，按条数截断）
+  max_context_tokens: 16000  # 新增：按 token 截断（优先于条数截断）
 
 # Channel 配置
 channels:
   cli:
-    enabled: true   # CLI + Discord 同时启动
+    enabled: false   
   telegram:
     enabled: false  # Phase 0 先关闭
     token: ${TELEGRAM_BOT_TOKEN}
@@ -53,6 +53,13 @@ channels:
     host: "0.0.0.0"
     port: 8080
     api_key: ${HTTP_API_KEY}  # 可选：API Key 认证，为空则不验证
+
+# Channel 专用工具配置
+# 当消息来自某个 channel 时，自动将这些工具添加到可用工具列表
+# 注意：这些工具需要单独实现，这里只是建立机制
+channel_tools:
+  discord: [discord_send_message, discord_reply_message, discord_add_reaction, discord_create_thread]
+  telegram: [telegram_send_message]
 
 # 路由规则（按顺序匹配，第一个匹配生效）
 routing:

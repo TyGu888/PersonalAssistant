@@ -63,8 +63,18 @@ class AgentRequest:
     # Tool context 中可序列化的数据
     tool_context_data: dict = field(default_factory=dict)
     
+    # 消息上下文（世界信息）
+    msg_context: dict = field(default_factory=dict)  # 包含 user_id, channel, timestamp, is_group 等
+    
     def to_json(self) -> str:
         """序列化为 JSON 字符串"""
+        # 序列化 msg_context 中的 datetime
+        msg_context_serialized = dict(self.msg_context) if self.msg_context else {}
+        if msg_context_serialized.get("timestamp"):
+            ts = msg_context_serialized["timestamp"]
+            if hasattr(ts, "isoformat"):
+                msg_context_serialized["timestamp"] = ts.isoformat()
+        
         return json.dumps({
             "request_id": self.request_id,
             "agent_id": self.agent_id,
@@ -73,13 +83,24 @@ class AgentRequest:
             "memories": self.memories,
             "tool_names": self.tool_names,
             "images": self.images,
-            "tool_context_data": self.tool_context_data
+            "tool_context_data": self.tool_context_data,
+            "msg_context": msg_context_serialized
         }, ensure_ascii=False)
     
     @classmethod
     def from_json(cls, data: str) -> 'AgentRequest':
         """从 JSON 字符串反序列化"""
         obj = json.loads(data)
+        
+        # 反序列化 msg_context 中的 timestamp
+        msg_context = obj.get("msg_context", {})
+        if msg_context.get("timestamp"):
+            from dateutil import parser as date_parser
+            try:
+                msg_context["timestamp"] = date_parser.parse(msg_context["timestamp"])
+            except:
+                pass  # 保持原值
+        
         return cls(
             request_id=obj["request_id"],
             agent_id=obj["agent_id"],
@@ -88,7 +109,8 @@ class AgentRequest:
             memories=obj["memories"],
             tool_names=obj["tool_names"],
             images=obj.get("images", []),
-            tool_context_data=obj.get("tool_context_data", {})
+            tool_context_data=obj.get("tool_context_data", {}),
+            msg_context=msg_context
         )
 
 

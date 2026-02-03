@@ -171,6 +171,34 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
             # - 私聊直接回复
             reply_expected = not is_group or is_mentioned
             
+            # 构建 raw 字段，包含 Discord 特有信息
+            raw = {
+                "message_id": message.id,
+                "channel_id": message.channel.id,
+                "guild_id": message.guild.id if message.guild else None,
+                "author_name": str(message.author),
+                "author_display_name": message.author.display_name,
+            }
+            
+            # 添加 channel name
+            if hasattr(message.channel, 'name'):
+                raw["channel_name"] = message.channel.name
+            
+            # 添加 guild name
+            if message.guild:
+                raw["guild_name"] = message.guild.name
+            
+            # 添加 thread 信息（如果在 thread 中）
+            if isinstance(message.channel, discord.Thread):
+                raw["is_thread"] = True
+                raw["thread_id"] = message.channel.id
+                raw["thread_name"] = message.channel.name
+                raw["parent_channel_id"] = message.channel.parent_id
+                if message.channel.parent:
+                    raw["parent_channel_name"] = message.channel.parent.name
+            else:
+                raw["is_thread"] = False
+            
             # 构建 IncomingMessage
             incoming_message = IncomingMessage(
                 channel="discord",
@@ -179,12 +207,7 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
                 is_group=is_group,
                 group_id=group_id,
                 reply_expected=reply_expected,
-                raw={
-                    "message_id": message.id,
-                    "channel_id": message.channel.id,
-                    "guild_id": message.guild.id if message.guild else None,
-                    "author_name": str(message.author),
-                }
+                raw=raw
             )
             
             # 调用消息处理回调（会记录消息到 memory）

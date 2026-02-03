@@ -1,11 +1,13 @@
 # Personal Agent Hub
 
-一个可扩展的个人 AI 助手框架，支持多渠道接入、多 Agent 人设、可插拔 Tools、长期记忆。
+Pyhton vsersion of OpenClawd
+
+一个可扩展的个人 AI 助手框架，支持多渠道接入、Agent、可插拔 Tools、长期记忆。
 
 ## 特性
 
 - **多渠道接入**: CLI / Telegram / Discord / HTTP API
-- **多 Agent 人设**: 学习教练、编程助手、通用助手...
+- **多 Agent **: 学习教练、编程助手、通用助手...
 - **可插拔 Tools**: 定时提醒、文件操作、Shell 执行、网页搜索、MCP 协议...
 - **长期记忆**: Session 历史 (SQLite) + RAG 向量搜索 (ChromaDB)
 - **Skills 系统**: Anthropic 风格的 Markdown 配置文件

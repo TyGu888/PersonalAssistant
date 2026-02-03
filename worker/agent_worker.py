@@ -348,13 +348,14 @@ class AgentWorker:
             worker_context = WorkerToolContext(memory=self.memory)
             tool_context = worker_context.to_dict()
             
-            # 运行 Agent
+            # 运行 Agent（传递 msg_context）
             response_text = await agent.run(
                 user_text=request.user_text,
                 context=context,
                 tools=tools,
                 tool_context=tool_context,
-                images=request.images if request.images else None
+                images=request.images if request.images else None,
+                msg_context=request.msg_context if request.msg_context else None
             )
             
             # 收集结果

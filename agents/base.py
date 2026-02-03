@@ -40,7 +40,8 @@ class BaseAgent:
         context: dict, 
         tools: list[dict], 
         tool_context: dict = None,
-        images: list[str] = None
+        images: list[str] = None,
+        msg_context: dict = None
     ) -> str:
         """
         运行 Agent 处理用户消息
@@ -54,12 +55,21 @@ class BaseAgent:
         - tools: Tool schema 列表（OpenAI function calling 格式）
         - tool_context: Tool 执行时注入的上下文 {"engine": ..., "scheduler": ..., "memory": ...}
         - images: 图片列表（路径或 data URL）
+        - msg_context: 消息上下文（世界信息）{
+            "user_id": str,           # 发消息的用户 ID
+            "channel": str,           # 消息来源渠道
+            "timestamp": datetime,    # 消息时间
+            "is_group": bool,         # 是否群聊
+            "group_id": str,          # 群 ID（群聊时）
+            "is_owner": bool,         # 是否 owner
+            "raw": dict               # 渠道特有信息
+          }
         
         输出: str（回复文本）
         
         流程:
         1. 构建 messages:
-           - system: prompt + memories
+           - system: prompt + memories + 世界信息
            - history: 最近对话
            - user: 当前消息（可能包含图片）
         2. 检查 token 数，必要时压缩上下文
@@ -73,7 +83,7 @@ class BaseAgent:
         """
         # 构建系统消息
         memories = context.get("memories", [])
-        system_content = self._build_system_message(memories)
+        system_content = self._build_system_message(memories, msg_context)
         
         # 构建消息列表
         history = context.get("history", [])
@@ -135,26 +145,82 @@ class BaseAgent:
         # 如果达到最大循环次数，返回最后一次的回复
         return assistant_message.content or "已达到最大 tool_calls 循环次数，请重试。"
     
-    def _build_system_message(self, memories: list[str]) -> str:
+    def _build_system_message(self, memories: list[str], msg_context: dict = None) -> str:
         """
-        构建系统消息（合并 prompt 和记忆）
+        构建系统消息（合并 prompt、世界信息和记忆）
         
         格式:
         {system_prompt}
+        
+        ## 当前消息上下文
+        - 来源渠道: {channel}
+        - 发送者: {user_id}
+        - 时间: {timestamp}
+        ...
         
         ## 关于用户的记忆
         - {memory1}
         - {memory2}
         ...
+        
+        ## 回复指南
+        - 如果无需回复，输出 <NO_REPLY>
         """
-        if not memories:
-            return self.system_prompt
+        result = self.system_prompt
         
-        memory_section = "\n\n## 关于用户的记忆\n"
-        for memory in memories:
-            memory_section += f"- {memory}\n"
+        # 添加世界信息（消息上下文）
+        if msg_context:
+            result += "\n\n## 当前消息上下文"
+            result += f"\n- 来源渠道: {msg_context.get('channel', 'unknown')}"
+            result += f"\n- 发送者 ID: {msg_context.get('user_id', 'unknown')}"
+            
+            timestamp = msg_context.get('timestamp')
+            if timestamp:
+                result += f"\n- 发送时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+            
+            is_group = msg_context.get('is_group', False)
+            result += f"\n- 是否群聊: {'是' if is_group else '否'}"
+            
+            if is_group and msg_context.get('group_id'):
+                result += f"\n- 群 ID: {msg_context.get('group_id')}"
+            
+            # Owner 标识
+            is_owner = msg_context.get('is_owner', False)
+            if is_owner:
+                result += "\n- **此消息来自 owner（主人），请认真对待每一条消息**"
+            else:
+                result += "\n- 此消息来自非 owner 用户，可酌情区分对待"
+            
+            # 渠道特有信息
+            raw = msg_context.get('raw', {})
+            if raw:
+                channel = msg_context.get('channel', '')
+                if channel == 'discord':
+                    result += "\n\n### Discord 特有信息"
+                    if raw.get('guild_name'):
+                        result += f"\n- 服务器: {raw.get('guild_name')}"
+                    if raw.get('channel_name'):
+                        result += f"\n- 频道: {raw.get('channel_name')}"
+                    if raw.get('author_display_name'):
+                        result += f"\n- 发送者昵称: {raw.get('author_display_name')}"
+                    if raw.get('is_thread'):
+                        result += f"\n- 在 Thread 中: 是"
+                        result += f"\n- Thread 名称: {raw.get('thread_name')}"
+                        if raw.get('parent_channel_name'):
+                            result += f"\n- 父频道: {raw.get('parent_channel_name')}"
         
-        return self.system_prompt + memory_section
+        # 添加记忆
+        if memories:
+            result += "\n\n## 关于用户的记忆"
+            for memory in memories:
+                result += f"\n- {memory}"
+        
+        # 添加 NO_REPLY 机制说明
+        result += "\n\n## 回复指南"
+        result += "\n- 当你认为这条消息无需回复时（例如用户只是闲聊的一部分、感谢语、或消息不是针对你的），直接输出 `<NO_REPLY>` 作为完整回复"
+        result += "\n- 如果需要正常回复，直接输出回复内容即可（不要包含 <NO_REPLY>）"
+        
+        return result
     
     def _build_messages(
         self, 

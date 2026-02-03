@@ -563,6 +563,32 @@ class Engine:
             "pending_attachments": []  # Tool 可以往这里添加要发送的文件路径
         }
     
+    def _get_channel_owners(self, channel: str) -> set[str]:
+        """
+        获取指定 channel 的 owner 列表（allowed_users）
+        
+        参数:
+        - channel: channel 名称
+        
+        返回: owner user_id 集合
+        """
+        channels_config = self.config.get("channels", {})
+        channel_config = channels_config.get(channel, {})
+        allowed_users = channel_config.get("allowed_users", [])
+        return set(str(uid) for uid in allowed_users)
+    
+    def _get_channel_tools(self, channel: str) -> list[str]:
+        """
+        获取指定 channel 对应的 tools 列表
+        
+        参数:
+        - channel: channel 名称
+        
+        返回: tool 名称列表
+        """
+        channel_tools = self.config.get("channel_tools", {})
+        return channel_tools.get(channel, [])
+    
     async def handle(self, msg: IncomingMessage) -> OutgoingMessage:
         """
         处理消息（核心流程）:
@@ -571,14 +597,16 @@ class Engine:
         2. 保存用户消息到 memory
         3. 检查 reply_expected，如果为 False 则跳过 Agent 调用
         4. Router.resolve(msg) -> Route
-        5. 获取 Agent 实例
-        6. MemoryManager.get_context() -> 历史 + 相关记忆
-        7. tools = registry.get_schemas(route.tools)
-        8. 根据 process_mode 选择执行方式:
+        5. 添加 channel_tools 到 route.tools
+        6. 构建 msg_context（世界信息）
+        7. MemoryManager.get_context() -> 历史 + 相关记忆
+        8. tools = registry.get_schemas(route.tools)
+        9. 根据 process_mode 选择执行方式:
            - embedded: 直接调用 Agent.run()
            - separated: 通过 AgentClient 发送到 Worker 进程
-        9. MemoryManager.save() -> 保存 assistant 回复
-        10. return OutgoingMessage(text=response)
+        10. 检查 NO_REPLY，如果返回 <NO_REPLY> 则返回空消息
+        11. MemoryManager.save() -> 保存 assistant 回复
+        12. return OutgoingMessage(text=response)
         """
         try:
             # 1. 获取 session_id
@@ -594,7 +622,28 @@ class Engine:
             # 4. 路由
             route = self.router.resolve(msg)
             
-            # 5. 获取上下文（从配置读取 max_context_messages）
+            # 5. 添加 channel_tools 到 route.tools
+            channel_tools = self._get_channel_tools(msg.channel)
+            if channel_tools:
+                # 合并 tools，避免重复
+                all_tools = list(route.tools) + [t for t in channel_tools if t not in route.tools]
+                route = type(route)(agent_id=route.agent_id, tools=all_tools)
+            
+            # 6. 构建 msg_context（世界信息）
+            owners = self._get_channel_owners(msg.channel)
+            is_owner = msg.user_id in owners
+            
+            msg_context = {
+                "user_id": msg.user_id,
+                "channel": msg.channel,
+                "timestamp": msg.timestamp,
+                "is_group": msg.is_group,
+                "group_id": msg.group_id,
+                "is_owner": is_owner,
+                "raw": msg.raw
+            }
+            
+            # 7. 获取上下文（从配置读取 max_context_messages）
             max_context_messages = self.config.get("memory", {}).get("max_context_messages", 20)
             context = await self.memory.get_context(
                 session_id=session_id,
@@ -603,7 +652,7 @@ class Engine:
                 history_limit=max_context_messages
             )
             
-            # 6. 根据 process_mode 选择执行方式
+            # 8. 根据 process_mode 选择执行方式
             if self.process_mode == "separated" and self.agent_client:
                 # 分离模式：通过 AgentClient 发送到 Worker 进程
                 result = await self.agent_client.run(
@@ -611,7 +660,8 @@ class Engine:
                     user_text=msg.text,
                     context=context,
                     tool_names=route.tools,
-                    images=msg.images if msg.images else None
+                    images=msg.images if msg.images else None,
+                    msg_context=msg_context
                 )
                 
                 response = result.text
@@ -646,15 +696,21 @@ class Engine:
                     context=context,
                     tools=tools,
                     tool_context=tool_context,
-                    images=msg.images if msg.images else None
+                    images=msg.images if msg.images else None,
+                    msg_context=msg_context
                 )
                 
                 attachments = tool_context.get("pending_attachments", [])
             
-            # 7. 保存 assistant 回复
+            # 9. 检查 NO_REPLY
+            if response and "<NO_REPLY>" in response:
+                logger.debug(f"Agent returned NO_REPLY for message from {msg.user_id}")
+                return OutgoingMessage(text="")
+            
+            # 10. 保存 assistant 回复
             self.memory.save_message(session_id, "assistant", response)
             
-            # 8. 返回响应（包含 Tool 执行过程中收集的附件）
+            # 11. 返回响应（包含 Tool 执行过程中收集的附件）
             return OutgoingMessage(text=response, attachments=attachments)
         
         except Exception as e:

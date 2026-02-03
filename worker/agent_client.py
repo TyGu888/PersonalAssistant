@@ -61,7 +61,8 @@ class AgentClient:
         user_text: str,
         context: dict,
         tool_names: list[str],
-        images: list[str] = None
+        images: list[str] = None,
+        msg_context: dict = None
     ) -> AgentRunResult:
         """
         执行 Agent（在 Worker 进程中）
@@ -72,6 +73,7 @@ class AgentClient:
         - context: 上下文 {"history": list[ChatMessage], "memories": list[str]}
         - tool_names: 允许使用的 Tool 名称列表
         - images: 可选的图片列表
+        - msg_context: 消息上下文（世界信息）
         
         返回: AgentRunResult
         - text: Agent 响应文本
@@ -105,7 +107,8 @@ class AgentClient:
             memories=memories,
             tool_names=tool_names,
             images=images or [],
-            tool_context_data={}
+            tool_context_data={},
+            msg_context=msg_context or {}
         )
         
         logger.debug(

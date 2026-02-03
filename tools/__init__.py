@@ -5,3 +5,4 @@ from tools import shell
 from tools import web
 from tools import image
 from tools import mcp_client
+from tools import discord

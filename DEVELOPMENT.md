@@ -201,6 +201,44 @@ engine:
   num_workers: 2
 ```
 
+- **process_mode**
+  - `embedded`：Agent 在主进程里跑，适合开发调试、单机轻量。
+  - `separated`：Agent 在独立 Worker 子进程里跑，Gateway 只做路由和 Channel，适合生产、多请求并发。
+- **num_workers**（仅 `separated` 时生效）
+  - Worker 进程数量。每个请求会分配到一个空闲 Worker 执行（LLM + Tools）。
+  - 数量越大：并发能力越强（多用户/多消息同时处理），但内存占用越高（每个 Worker 一份 LLM 客户端和 Tools）。
+  - 建议：开发/单用户 1～2，多用户可调到 4 或以上，按机器内存调整。
+
+### 测试指南
+
+大更新后建议按下面顺序测，先保证主流程再测分离模式。
+
+1. **快速单条对话（不启 Worker 池）**
+   ```bash
+   python main.py chat "你好"
+   python main.py chat "提醒我明天 9 点开会"   # 测 scheduler 路由
+   ```
+   说明：`chat` 命令不会执行 `engine.run()`，因此不会启动 Worker 池；即使配置了 `process_mode: separated`，这一条也会走内嵌逻辑，用于快速验证路由、Agent、Tools 是否正常。
+
+2. **内嵌模式完整跑一遍**
+   - 在 `config.yaml` 里设 `process_mode: "embedded"`。
+   - 启动服务：`python main.py start`。
+   - 用当前已开启的 Channel 发消息（例如 Discord），测多轮对话、定时提醒、Tool 调用等。
+
+3. **分离模式（Worker 池）**
+   - 在 `config.yaml` 里设 `process_mode: "separated"`，`num_workers: 2`（或 1 先试）。
+   - 启动：`python main.py start`，看日志里是否有 `Starting WorkerPool with N workers`、`WorkerPool started`。
+   - 再通过 Discord/Telegram/HTTP 发消息，确认回复正常；可同时发多条或多个会话，观察是否由不同 Worker 处理（日志里会有 worker 相关输出）。
+
+4. **按功能抽查**
+   - 学习/复习/督促 → 走 study_coach + scheduler。
+   - 搜索/网页 → default + web_search / fetch_url。
+   - 执行/命令/沙箱 → run_command、sandbox_*。
+   - 提醒/定时 → scheduler_add/list/cancel。
+   - 兜底句 → default + 全 tools。
+
+环境变量：确保 `.env` 或本机已设置 `ARK_API_KEY`，若开 Telegram/Discord/HTTP 则对应 token 也需配置。
+
 ### 路由规则
 
 | 匹配关键词 | Agent | Tools |
