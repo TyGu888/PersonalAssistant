@@ -11,7 +11,7 @@ engine:
   # 进程模式:
   # - "embedded": 内嵌模式，Agent 在主进程中运行（默认，适合开发调试）
   # - "separated": 分离模式，Agent 在独立 Worker 进程中运行（适合生产环境）
-  process_mode: "separated"
+  process_mode: "embedded"
   # Worker 进程数量（仅分离模式时有效）
   num_workers: 2
 
@@ -33,6 +33,7 @@ skills:
 
 # Memory 配置
 memory:
+  identity_mode: "single_owner"  # "single_owner" | "multi_user"
   max_context_messages: 50  # 上下文最大消息数（向后兼容，按条数截断）
   max_context_tokens: 16000  # 新增：按 token 截断（优先于条数截断）
 

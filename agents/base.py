@@ -191,23 +191,14 @@ class BaseAgent:
             else:
                 result += "\n- 此消息来自非 owner 用户，可酌情区分对待"
             
-            # 渠道特有信息
+            # 渠道特有信息 (Raw Context)
+            # 直接展示所有 raw 字段，供 LLM 使用（如 channel_id, message_id 等）
             raw = msg_context.get('raw', {})
             if raw:
-                channel = msg_context.get('channel', '')
-                if channel == 'discord':
-                    result += "\n\n### Discord 特有信息"
-                    if raw.get('guild_name'):
-                        result += f"\n- 服务器: {raw.get('guild_name')}"
-                    if raw.get('channel_name'):
-                        result += f"\n- 频道: {raw.get('channel_name')}"
-                    if raw.get('author_display_name'):
-                        result += f"\n- 发送者昵称: {raw.get('author_display_name')}"
-                    if raw.get('is_thread'):
-                        result += f"\n- 在 Thread 中: 是"
-                        result += f"\n- Thread 名称: {raw.get('thread_name')}"
-                        if raw.get('parent_channel_name'):
-                            result += f"\n- 父频道: {raw.get('parent_channel_name')}"
+                channel = msg_context.get('channel', 'unknown')
+                result += f"\n\n### {channel.capitalize()} Context (Raw)"
+                for k, v in raw.items():
+                    result += f"\n- {k}: {v}"
         
         # 添加记忆
         if memories:

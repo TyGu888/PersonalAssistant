@@ -29,6 +29,7 @@ import tools.filesystem
 import tools.web
 import tools.shell
 import tools.image
+import tools.subagent
 
 # Worker 进程模块（条件导入）
 try:
@@ -589,6 +590,30 @@ class Engine:
         channel_tools = self.config.get("channel_tools", {})
         return channel_tools.get(channel, [])
     
+    def _resolve_person_id(self, channel: str, user_id: str) -> str:
+        """
+        把渠道 user_id 映射到统一的 person_id
+        
+        single_owner 模式：所有 allowed_users 都是同一个人，返回 "owner"
+        multi_user 模式：保持原样，返回 "{channel}:{user_id}"（未来扩展）
+        
+        参数:
+        - channel: channel 名称
+        - user_id: 渠道用户 ID
+        
+        返回: 统一的 person_id
+        """
+        identity_mode = self.config.get("memory", {}).get("identity_mode", "single_owner")
+        
+        if identity_mode == "single_owner":
+            logger.debug(f"Identity mapping (single_owner): {channel}:{user_id} -> owner")
+            return "owner"
+        
+        # multi_user 模式：保留原始标识
+        person_id = f"{channel}:{user_id}"
+        logger.debug(f"Identity mapping (multi_user): {channel}:{user_id} -> {person_id}")
+        return person_id
+    
     async def handle(self, msg: IncomingMessage) -> OutgoingMessage:
         """
         处理消息（核心流程）:
@@ -644,11 +669,14 @@ class Engine:
             }
             
             # 7. 获取上下文（从配置读取 max_context_messages）
+            # 解析统一身份标识
+            person_id = self._resolve_person_id(msg.channel, msg.user_id)
+            
             max_context_messages = self.config.get("memory", {}).get("max_context_messages", 20)
             context = await self.memory.get_context(
                 session_id=session_id,
                 query=msg.text,
-                user_id=msg.user_id,
+                person_id=person_id,
                 history_limit=max_context_messages
             )
             
@@ -691,6 +719,12 @@ class Engine:
                 
                 # 运行 Agent（获取 tool_context 以便收集附件）
                 tool_context = self.get_tool_context()
+                # 添加 person_id、session_id 和 msg_context 供 tools 使用
+                tool_context["person_id"] = person_id
+                tool_context["session_id"] = session_id
+                # 同时把 session_id 放到 msg_context 中，便于 tools 访问
+                msg_context["session_id"] = session_id
+                tool_context["msg_context"] = msg_context
                 response = await agent.run(
                     user_text=msg.text,
                     context=context,

@@ -1,6 +1,6 @@
 # Personal Agent Hub - 开发追踪
 
-> 最后更新: 2026-01-30
+> 最后更新: 2026-02-03
 
 快速了解项目架构和开发进展。详细技术设计见 `personal-agent-hub-design.md`。
 
@@ -12,10 +12,11 @@
 - 多渠道接入（CLI / Telegram / Discord / HTTP API）
 - 多 Agent 人设（学习教练、编程助手、通用助手...）
 - 可插拔 Tools（定时提醒、文件操作、Shell、网页搜索、MCP...）
-- 长期记忆（Session 历史 + RAG 向量搜索）
+- 长期记忆（Session 历史 + RAG 向量搜索 + 跨渠道身份统一）
 - Skills 系统（Anthropic Markdown 格式配置）
 - 进程解耦（Gateway/Agent 分离）
 - Docker 沙箱（容器隔离执行）
+- Sub-Agent 系统（生成子 Agent 执行复杂任务）
 
 ---
 
@@ -44,12 +45,14 @@ personal_agent_hub/
 ├── tools/
 │   ├── registry.py      # Tool 注册系统（支持 MCP）
 │   ├── scheduler.py     # 智能定时提醒（auto_continue）
-│   ├── filesystem.py    # 文件操作
+│   ├── filesystem.py    # 文件操作（含 edit/find/grep）
 │   ├── shell.py         # Shell 命令（含持久化会话）
 │   ├── web.py           # 网页搜索 / 抓取
 │   ├── image.py         # 图片处理 (Pillow)
 │   ├── sandbox.py       # Docker 沙箱
-│   └── mcp_client.py    # MCP 协议客户端
+│   ├── mcp_client.py    # MCP 协议客户端
+│   ├── memory.py        # 记忆工具（search/add）
+│   └── subagent.py      # Sub-Agent 系统
 ├── skills/              # Skills 配置目录
 │   ├── loader.py        # Skill 加载器
 │   ├── study_coach/SKILL.md
@@ -112,6 +115,8 @@ Gateway 进程 (主进程)               Agent Worker 进程 (子进程 ×N)
 | **tools/sandbox.py** | Docker 沙箱，容器隔离执行 |
 | **tools/mcp_client.py** | MCP 协议客户端，连接外部 MCP Server |
 | **tools/image.py** | 图片处理：压缩、格式转换、Vision API 集成 |
+| **tools/memory.py** | 记忆工具：memory_search（主动搜索）、memory_add（主动添加） |
+| **tools/subagent.py** | Sub-Agent 系统：agent_spawn、agent_list、agent_send、agent_history |
 | **skills/loader.py** | 加载 SKILL.md 文件（Anthropic Markdown 格式） |
 | **worker/pool.py** | Worker 进程池，管理 Agent 子进程 |
 | **utils/token_counter.py** | tiktoken Token 计数器 |
@@ -261,8 +266,8 @@ engine:
 | **Core** | engine, router, types | ✅ |
 | **Channels** | CLI, Telegram, Discord, HTTP | ✅ |
 | **Agents** | base (Token + 多模态), study_coach | ✅ |
-| **Tools** | registry, scheduler, filesystem, shell, web, image, sandbox, mcp_client | ✅ |
-| **Memory** | session, global_mem, manager (Token 截断) | ✅ |
+| **Tools** | registry, scheduler, filesystem, shell, web, image, sandbox, mcp_client, discord, memory, subagent | ✅ |
+| **Memory** | session, global_mem (scope + person_id), manager (Token 截断 + Identity Mapping) | ✅ |
 | **Skills** | loader, study_coach, default, coding_assistant | ✅ |
 | **Worker** | agent_worker, agent_client, pool, protocol | ✅ |
 | **Utils** | token_counter | ✅ |
@@ -286,6 +291,15 @@ engine:
 - [x] Docker 沙箱执行
 - [x] MCP 协议接入
 - [x] 进程解耦（Gateway/Agent 分离）
+- [x] 世界信息传递（channel, user_id, timestamp, is_owner）
+- [x] NO_REPLY 机制（Agent 可选择不回复）
+- [x] Channel Tools（channel_tools 配置自动加载）
+- [x] Discord Tools（send, reply, reaction, thread）
+- [x] 跨渠道身份统一（Identity Mapping: user_id → person_id）
+- [x] 记忆分层（Memory Scope: global + personal）
+- [x] 文件精确编辑（edit_file, find_files, grep_files）
+- [x] Memory Tools（Agent 主动搜索/添加记忆）
+- [x] Sub-Agent 系统（agent_spawn, agent_list, agent_send, agent_history）
 
 ---
 
@@ -293,6 +307,13 @@ engine:
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-02-03 | Sub-Agent 系统：agent_spawn、agent_list、agent_send、agent_history |
+| 2026-02-03 | Memory Tools：memory_search（主动搜索）、memory_add（主动添加） |
+| 2026-02-03 | Memory 框架重构：Identity Mapping（跨渠道身份统一）+ Memory Scope（global/personal） |
+| 2026-02-03 | 文件工具增强：edit_file（精确替换）、find_files（Glob 查找）、grep_files（内容搜索） |
+| 2026-01-31 | Channel-Agent 架构改进：世界信息传递、Owner 识别、NO_REPLY 机制 |
+| 2026-01-31 | Channel Tools 机制：channel_tools 配置，自动合并到路由 |
+| 2026-01-31 | Discord Tools：send_message, reply_message, add_reaction, create_thread |
 | 2026-01-30 | 进程解耦：Gateway/Agent 分离，Worker 进程池 |
 | 2026-01-30 | MCP 协议接入：连接外部 MCP Server |
 | 2026-01-30 | Docker 沙箱：容器隔离执行 Shell 命令 |
@@ -339,8 +360,90 @@ docker>=6.0.0
 | 方向 | 说明 |
 |------|------|
 | 智能路由 | 用 LLM (Meta-Agent) 动态决定路由 |
-| 更多 Tools | calendar（日程）、email、notion 集成 |
 | 微信 Channel | 个人微信 / 企业微信接入 |
+| cron 增强 | 完整 cron 表达式、recurring jobs |
+| 后台进程管理 | process_start, process_list, process_kill |
+| 统一消息工具 | 跨渠道 message 工具 |
+| 无头浏览器 | browser_* (Playwright) |
+
+---
+
+## 已完成: Tool 能力对齐 clawdbot (2026-02-03)
+
+> 目标：将 PersonalAssistant 的工具能力与 clawdbot 对齐，实现操作系统级的 Agent 能力
+
+### 已实现工具
+
+| 类别 | 工具 | 说明 |
+|------|------|------|
+| **文件操作** | `edit_file` | 精确字符串替换（类似 StrReplace） |
+| **文件操作** | `find_files` | Glob 模式查找文件 |
+| **文件操作** | `grep_files` | 搜索文件内容（正则 + 上下文） |
+| **记忆** | `memory_search` | Agent 主动搜索记忆（支持 scope 过滤） |
+| **记忆** | `memory_add` | Agent 主动添加记忆（支持 global/personal） |
+| **Sub-Agent** | `agent_spawn` | 生成子 Agent 执行任务（同步/异步） |
+| **Sub-Agent** | `agent_list` | 列出子 Agent 状态 |
+| **Sub-Agent** | `agent_send` | 给子 Agent 发消息 |
+| **Sub-Agent** | `agent_history` | 获取子 Agent 对话历史 |
+
+### 待实现工具
+
+| 类别 | 工具 | 说明 |
+|------|------|------|
+| **定时任务** | `cron_*` | 完整 cron 表达式支持 |
+| **进程管理** | `process_*` | 后台进程管理 |
+| **消息** | `message` | 统一跨渠道消息工具 |
+| **浏览器** | `browser_*` | 无头浏览器控制（Playwright） |
+
+---
+
+## 已完成: 记忆框架重构 (2026-02-03)
+
+### 实现内容
+
+**1. Identity Mapping（跨渠道身份统一）**
+
+- 配置：`memory.identity_mode: "single_owner"` 或 `"multi_user"`
+- `single_owner` 模式：所有 allowed_users 映射到同一个 `person_id`（"owner"）
+- 代码：`core/engine.py` 添加 `_resolve_person_id()` 方法
+
+**2. Memory Scope（记忆分层）**
+
+- `global`：环境信息，所有对话可检索
+- `personal`：用户相关记忆，跨渠道共享
+- 代码改动：
+  - `core/types.py`：MemoryItem 添加 `person_id` 和 `scope` 字段
+  - `memory/global_mem.py`：add/search 支持 scope 过滤
+  - `memory/manager.py`：get_context 使用 person_id
+
+**3. Memory Tools**
+
+- `memory_search`：Agent 主动搜索记忆
+- `memory_add`：Agent 主动添加记忆
+
+### 配置示例
+
+```yaml
+memory:
+  identity_mode: "single_owner"  # "single_owner" | "multi_user"
+  max_context_messages: 50
+  max_context_tokens: 16000
+```
+
+### 未来扩展：Team Assistant
+
+支持多 person_id 映射：
+```yaml
+identity:
+  mapping:
+    - person_id: alice
+      channels:
+        discord: ["123456"]
+        telegram: ["789"]
+    - person_id: bob
+      channels:
+        discord: ["654321"]
+```
 
 ### 中期
 

@@ -1,5 +1,6 @@
 from tools.registry import registry
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -343,3 +344,244 @@ async def send_file(filename: str, message: str = "", context=None) -> str:
         return f"错误: {str(e)}"
     except Exception as e:
         return f"错误: 发送文件失败 - {str(e)}"
+
+
+@registry.register(
+    name="edit_file",
+    description="精确编辑文件：查找并替换指定字符串",
+    parameters={
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string", "description": "文件名（相对于工作区）"},
+            "old_string": {"type": "string", "description": "要替换的原始字符串（必须唯一，除非 replace_all=True）"},
+            "new_string": {"type": "string", "description": "替换后的字符串"},
+            "replace_all": {"type": "boolean", "description": "是否替换所有匹配", "default": False}
+        },
+        "required": ["filename", "old_string", "new_string"]
+    }
+)
+async def edit_file(filename: str, old_string: str, new_string: str, replace_all: bool = False, context=None) -> str:
+    """
+    精确编辑文件：查找并替换指定字符串
+    
+    流程:
+    1. 验证路径安全性
+    2. 读取文件内容
+    3. 检查 old_string 出现次数
+    4. 如果不唯一且 replace_all=False，返回错误
+    5. 执行替换并写回文件
+    
+    返回: "文件已编辑: {filename}" 或错误信息
+    """
+    try:
+        safe_path = _safe_path(filename)
+        
+        if not safe_path.exists():
+            return f"错误: 文件不存在: {filename}"
+        
+        if not safe_path.is_file():
+            return f"错误: 路径不是文件: {filename}"
+        
+        # 读取文件内容
+        content = safe_path.read_text(encoding='utf-8')
+        
+        # 检查 old_string 出现次数
+        count = content.count(old_string)
+        
+        if count == 0:
+            return f"错误: 未找到要替换的字符串"
+        
+        if count > 1 and not replace_all:
+            return f"错误: 找到 {count} 处匹配，请提供更精确的字符串或设置 replace_all=True"
+        
+        # 执行替换
+        if replace_all:
+            new_content = content.replace(old_string, new_string)
+            replaced_count = count
+        else:
+            new_content = content.replace(old_string, new_string, 1)
+            replaced_count = 1
+        
+        # 写回文件
+        safe_path.write_text(new_content, encoding='utf-8')
+        
+        return f"文件已编辑: {filename}（替换了 {replaced_count} 处）"
+    except ValueError as e:
+        return f"错误: {str(e)}"
+    except Exception as e:
+        return f"错误: 编辑文件失败 - {str(e)}"
+
+
+@registry.register(
+    name="find_files",
+    description="使用 glob 模式查找文件",
+    parameters={
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "Glob 模式，如 '*.py' 或 '**/test_*.py'"},
+            "directory": {"type": "string", "description": "搜索目录（相对于工作区，默认为空表示工作区根目录）", "default": ""}
+        },
+        "required": ["pattern"]
+    }
+)
+async def find_files(pattern: str, directory: str = "", context=None) -> str:
+    """
+    使用 glob 模式查找文件
+    
+    流程:
+    1. 验证路径安全性
+    2. 使用 pathlib.Path.glob() 查找匹配文件
+    3. 返回匹配的文件列表（相对于工作区的路径）
+    
+    返回: 匹配的文件列表或错误信息
+    """
+    try:
+        _ensure_workspace()
+        workspace_path = _get_workspace_path()
+        
+        # 确定搜索目录
+        if not directory:
+            search_path = workspace_path
+        else:
+            search_path = _safe_path(directory)
+            if not search_path.is_dir():
+                return f"错误: 目录不存在: {directory}"
+        
+        # 使用 glob 查找文件
+        matches = []
+        for match in search_path.glob(pattern):
+            # 只返回文件，不返回目录
+            if match.is_file():
+                # 返回相对于工作区的路径
+                rel_path = match.relative_to(workspace_path)
+                matches.append(str(rel_path))
+        
+        if not matches:
+            return f"未找到匹配 '{pattern}' 的文件"
+        
+        # 排序结果
+        matches.sort()
+        
+        header = f"找到 {len(matches)} 个匹配文件:"
+        return header + "\n" + "\n".join(matches)
+    except ValueError as e:
+        return f"错误: {str(e)}"
+    except Exception as e:
+        return f"错误: 查找文件失败 - {str(e)}"
+
+
+@registry.register(
+    name="grep_files",
+    description="搜索文件内容",
+    parameters={
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "搜索模式（支持正则表达式）"},
+            "directory": {"type": "string", "description": "搜索目录（相对于工作区）", "default": ""},
+            "glob": {"type": "string", "description": "文件过滤模式，如 '*.py'", "default": "*"},
+            "context_lines": {"type": "integer", "description": "显示匹配行前后的行数", "default": 2},
+            "max_results": {"type": "integer", "description": "最大返回结果数", "default": 50}
+        },
+        "required": ["pattern"]
+    }
+)
+async def grep_files(
+    pattern: str,
+    directory: str = "",
+    glob: str = "*",
+    context_lines: int = 2,
+    max_results: int = 50,
+    context=None
+) -> str:
+    """
+    搜索文件内容
+    
+    流程:
+    1. 遍历匹配 glob 的文件
+    2. 使用 re.search() 搜索每行
+    3. 返回匹配行 + 上下文
+    4. 格式化输出（文件名:行号:内容）
+    
+    返回: 搜索结果或错误信息
+    """
+    try:
+        _ensure_workspace()
+        workspace_path = _get_workspace_path()
+        
+        # 确定搜索目录
+        if not directory:
+            search_path = workspace_path
+        else:
+            search_path = _safe_path(directory)
+            if not search_path.is_dir():
+                return f"错误: 目录不存在: {directory}"
+        
+        # 编译正则表达式
+        try:
+            regex = re.compile(pattern)
+        except re.error as e:
+            return f"错误: 无效的正则表达式 - {str(e)}"
+        
+        results = []
+        total_matches = 0
+        
+        # 使用递归 glob 模式
+        glob_pattern = f"**/{glob}" if not glob.startswith("**/") else glob
+        
+        for file_path in search_path.glob(glob_pattern):
+            if not file_path.is_file():
+                continue
+            
+            # 尝试读取文件（跳过二进制文件）
+            try:
+                lines = file_path.read_text(encoding='utf-8').splitlines()
+            except (UnicodeDecodeError, PermissionError):
+                # 跳过无法读取的文件
+                continue
+            
+            # 搜索匹配行
+            file_matches = []
+            for line_num, line in enumerate(lines, 1):
+                if regex.search(line):
+                    file_matches.append((line_num, line))
+            
+            if not file_matches:
+                continue
+            
+            # 获取相对路径
+            rel_path = file_path.relative_to(workspace_path)
+            
+            # 处理每个匹配，添加上下文
+            for match_line_num, match_line in file_matches:
+                if total_matches >= max_results:
+                    break
+                
+                # 计算上下文范围
+                start_line = max(1, match_line_num - context_lines)
+                end_line = min(len(lines), match_line_num + context_lines)
+                
+                # 构建结果块
+                result_block = [f"--- {rel_path} ---"]
+                for ln in range(start_line, end_line + 1):
+                    prefix = ">" if ln == match_line_num else " "
+                    result_block.append(f"{prefix} {ln}: {lines[ln - 1]}")
+                
+                results.append("\n".join(result_block))
+                total_matches += 1
+            
+            if total_matches >= max_results:
+                break
+        
+        if not results:
+            return f"未找到匹配 '{pattern}' 的内容"
+        
+        header = f"找到 {total_matches} 处匹配"
+        if total_matches >= max_results:
+            header += f"（已达到最大结果数 {max_results}）"
+        header += ":"
+        
+        return header + "\n\n" + "\n\n".join(results)
+    except ValueError as e:
+        return f"错误: {str(e)}"
+    except Exception as e:
+        return f"错误: 搜索失败 - {str(e)}"

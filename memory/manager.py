@@ -110,10 +110,11 @@ class MemoryManager:
         self, 
         session_id: str, 
         query: str, 
-        user_id: str, 
+        person_id: str, 
         history_limit: int = None,
         max_tokens: int = None,
-        memory_limit: int = 5
+        memory_limit: int = 5,
+        include_global: bool = True
     ) -> dict:
         """
         获取对话上下文（支持基于 Token 截断）
@@ -121,10 +122,11 @@ class MemoryManager:
         输入:
         - session_id: Session ID
         - query: 当前用户消息（用于 RAG 搜索）
-        - user_id: 用户 ID（用于搜索该用户的记忆）
+        - person_id: 统一身份标识（用于搜索该用户的记忆）
         - history_limit: 历史消息数量限制（可选，默认使用配置值）
         - max_tokens: 历史消息的最大 token 数（可选，默认使用配置值）
         - memory_limit: 相关记忆数量限制
+        - include_global: 是否包含全局记忆
         
         输出:
         {
@@ -168,8 +170,13 @@ class MemoryManager:
                 [{"role": msg.role, "content": msg.content} for msg in history]
             )
         
-        # 搜索相关记忆
-        memory_items = await self.global_mem.search(user_id, query, top_k=memory_limit)
+        # 搜索相关记忆（使用 person_id 和 include_global）
+        memory_items = await self.global_mem.search(
+            person_id, 
+            query, 
+            top_k=memory_limit,
+            include_global=include_global
+        )
         
         # 将 MemoryItem 转换为字符串列表
         memories = [item.content for item in memory_items]
@@ -212,7 +219,12 @@ class MemoryManager:
     
     # ===== 记忆提取 =====
     
-    async def extract_memories(self, session_id: str, user_id: str) -> list[str]:
+    async def extract_memories(
+        self, 
+        session_id: str, 
+        person_id: str,
+        scope: str = "personal"
+    ) -> list[str]:
         """
         从 Session 提取记忆到 GlobalMemory
         
@@ -220,6 +232,11 @@ class MemoryManager:
         1. 获取 Session 完整历史
         2. 调用 LLM 提取关键信息
         3. 存入 GlobalMemory
+        
+        参数:
+        - session_id: 会话 ID
+        - person_id: 统一身份标识
+        - scope: 记忆范围 ("global" | "personal")
         
         输出: 提取的记忆内容列表
         """
@@ -286,7 +303,7 @@ class MemoryManager:
                 # 如果还是失败，返回空列表
                 return []
         
-        # 逐条存入 GlobalMemory
+        # 逐条存入 GlobalMemory（使用 person_id 和 scope）
         extracted_contents = []
         for memory_data in memories_data:
             if isinstance(memory_data, dict) and "type" in memory_data and "content" in memory_data:
@@ -295,10 +312,11 @@ class MemoryManager:
                 
                 # 存入 GlobalMemory
                 await self.global_mem.add(
-                    user_id=user_id,
+                    person_id=person_id,
                     content=memory_content,
                     memory_type=memory_type,
-                    source_session=session_id
+                    source_session=session_id,
+                    scope=scope
                 )
                 extracted_contents.append(memory_content)
         

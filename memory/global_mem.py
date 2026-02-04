@@ -12,14 +12,21 @@ class GlobalMemory:
         
         ChromaDB Collection:
         - name: "memories"
-        - metadata: {"user_id", "type", "source_session", "created_at", "active"}
+        - metadata: {"person_id", "type", "source_session", "created_at", "active", "scope"}
         
         注意: ChromaDB 有内置 embedding，可以不使用 OpenAI
         """
         self.client = chromadb.PersistentClient(path=db_path)
         self.collection = self.client.get_or_create_collection("memories")
     
-    async def add(self, user_id: str, content: str, memory_type: str, source_session: str) -> str:
+    async def add(
+        self, 
+        person_id: str, 
+        content: str, 
+        memory_type: str, 
+        source_session: str,
+        scope: str = "personal"
+    ) -> str:
         """
         添加一条记忆
         
@@ -28,17 +35,25 @@ class GlobalMemory:
         2. ChromaDB 自动计算 embedding
         3. 存入 collection
         
+        参数:
+        - person_id: 统一身份标识
+        - content: 记忆内容
+        - memory_type: 记忆类型
+        - source_session: 来源会话
+        - scope: 记忆范围 ("global" | "personal")
+        
         返回: 记忆 ID
         """
         memory_id = str(uuid.uuid4())
         created_at = datetime.utcnow().isoformat()
         
         metadata = {
-            "user_id": user_id,
+            "person_id": person_id,
             "type": memory_type,
             "source_session": source_session,
             "created_at": created_at,
-            "active": "true"  # ChromaDB metadata 需要字符串
+            "active": "true",  # ChromaDB metadata 需要字符串
+            "scope": scope
         }
         
         self.collection.add(
@@ -49,26 +64,61 @@ class GlobalMemory:
         
         return memory_id
     
-    async def search(self, user_id: str, query: str, top_k: int = 5) -> List[MemoryItem]:
+    async def search(
+        self, 
+        person_id: str, 
+        query: str, 
+        top_k: int = 5,
+        include_global: bool = True
+    ) -> List[MemoryItem]:
         """
         向量相似度搜索
         
         输入:
-        - user_id: 只搜索该用户的记忆
+        - person_id: 统一身份标识
         - query: 查询文本
         - top_k: 返回数量
+        - include_global: 是否包含全局记忆
+        
+        查询逻辑:
+        - include_global=True: 查询 scope="global" 或 (scope="personal" 且 person_id 匹配)
+        - include_global=False: 只查询 scope="personal" 且 person_id 匹配
         
         输出: [MemoryItem, ...] 按相似度排序
         """
+        # 构建查询条件
+        if include_global:
+            # 包含全局记忆：scope="global" 或 (scope="personal" 且 person_id 匹配)
+            where_filter = {
+                "$and": [
+                    {"active": {"$eq": "true"}},
+                    {
+                        "$or": [
+                            {"scope": {"$eq": "global"}},
+                            {
+                                "$and": [
+                                    {"scope": {"$eq": "personal"}},
+                                    {"person_id": {"$eq": person_id}}
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        else:
+            # 只查询个人记忆
+            where_filter = {
+                "$and": [
+                    {"person_id": {"$eq": person_id}},
+                    {"scope": {"$eq": "personal"}},
+                    {"active": {"$eq": "true"}}
+                ]
+            }
+        
         results = self.collection.query(
             query_texts=[query],
             n_results=top_k,
-            where={
-                "$and": [
-                    {"user_id": {"$eq": user_id}},
-                    {"active": {"$eq": "true"}}
-                ]
-            },
+            where=where_filter,
             include=["documents", "metadatas", "embeddings", "distances"]
         )
         
@@ -87,13 +137,14 @@ class GlobalMemory:
                 
                 memory_item = MemoryItem(
                     id=memory_id,
-                    user_id=metadata["user_id"],
+                    person_id=metadata.get("person_id", metadata.get("user_id", "")),  # 兼容旧数据
                     type=metadata["type"],
                     content=content,
                     embedding=embedding,
                     source_session=metadata["source_session"],
                     created_at=datetime.fromisoformat(metadata["created_at"]),
-                    active=metadata.get("active", "true") == "true"
+                    active=metadata.get("active", "true") == "true",
+                    scope=metadata.get("scope", "personal")  # 兼容旧数据默认 personal
                 )
                 memory_items.append(memory_item)
         

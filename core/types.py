@@ -65,13 +65,14 @@ class ChatMessage:
 class MemoryItem:
     """一条长期记忆"""
     id: str
-    user_id: str
-    type: str                 # "preference" | "fact" | "event" | "commitment"
+    person_id: str            # 统一身份标识（原 user_id）
+    type: str                 # "preference" | "fact" | "event" | "commitment" | "env"
     content: str
     embedding: list[float]
     source_session: str
     created_at: datetime
     active: bool = True
+    scope: str = "personal"   # "global" | "personal"
 
 # ===== Tool 相关 =====
 

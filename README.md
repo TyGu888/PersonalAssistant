@@ -9,12 +9,14 @@ Pyhton vsersion of OpenClawd
 - **多渠道接入**: CLI / Telegram / Discord / HTTP API
 - **多 Agent **: 学习教练、编程助手、通用助手...
 - **可插拔 Tools**: 定时提醒、文件操作、Shell 执行、网页搜索、MCP 协议...
-- **长期记忆**: Session 历史 (SQLite) + RAG 向量搜索 (ChromaDB)
+- **长期记忆**: Session 历史 (SQLite) + RAG 向量搜索 (ChromaDB) + 跨渠道身份统一
 - **Skills 系统**: Anthropic 风格的 Markdown 配置文件
 - **Token 管理**: tiktoken 精确计数，智能截断上下文
 - **多模态支持**: 图片处理与 Vision API 集成
 - **Docker 沙箱**: 容器隔离执行 Shell 命令
 - **进程解耦**: Gateway/Agent 分离，故障隔离
+- **Sub-Agent 系统**: 生成子 Agent 执行复杂任务
+- **Memory Tools**: Agent 主动搜索和添加记忆
 
 ## 快速开始
 
@@ -71,12 +73,14 @@ personal_agent_hub/
 ├── tools/
 │   ├── registry.py         # Tool 注册（支持 MCP）
 │   ├── scheduler.py        # 定时提醒
-│   ├── filesystem.py       # 文件操作
+│   ├── filesystem.py       # 文件操作（含 edit/find/grep）
 │   ├── shell.py            # Shell 执行（含持久化会话）
 │   ├── web.py              # 网页搜索/抓取
 │   ├── image.py            # 图片处理
 │   ├── sandbox.py          # Docker 沙箱
-│   └── mcp_client.py       # MCP 协议客户端
+│   ├── mcp_client.py       # MCP 协议客户端
+│   ├── memory.py           # 记忆工具（search/add）
+│   └── subagent.py         # Sub-Agent 系统
 ├── skills/                 # Skills 配置目录
 │   ├── loader.py           # Skill 加载器
 │   ├── study_coach/SKILL.md
@@ -138,6 +142,12 @@ sandbox:
 mcp:
   enabled: false
   servers: []
+
+# 记忆系统
+memory:
+  identity_mode: "single_owner"  # 跨渠道身份统一
+  max_context_messages: 50
+  max_context_tokens: 16000
 ```
 
 ## 系统架构
@@ -275,6 +285,46 @@ mcp:
       command: npx
       args: ["-y", "@modelcontextprotocol/server-filesystem", "./data/workspace"]
 ```
+
+## Sub-Agent 系统
+
+Agent 可以生成子 Agent 执行复杂任务：
+
+```python
+# Agent 调用 agent_spawn 工具
+agent_spawn(
+    task="分析这个代码库的架构",
+    label="代码分析",
+    agent_id="default",
+    timeout_seconds=300,
+    wait=True  # 同步等待结果
+)
+```
+
+配套工具：
+- `agent_list`: 列出子 Agent 状态
+- `agent_send`: 给子 Agent 发消息
+- `agent_history`: 获取子 Agent 对话历史
+
+## Memory Tools
+
+Agent 可以主动搜索和添加记忆：
+
+```python
+# 搜索记忆
+memory_search(query="用户的工作时间偏好", scope="personal")
+
+# 添加记忆
+memory_add(
+    content="用户喜欢早上 9 点开始工作",
+    memory_type="preference",
+    scope="personal"
+)
+```
+
+记忆范围：
+- `global`: 环境信息，所有对话可检索（如 channel ID、项目信息）
+- `personal`: 用户相关记忆，跨渠道共享
 
 ## License
 
