@@ -5,20 +5,29 @@ from pathlib import Path
 from typing import Optional
 
 
-# 工作区目录（相对于项目根目录）
-WORKSPACE_DIR = "./data/workspace"
+# 允许访问的目录白名单（相对于项目根目录）
+ALLOWED_DIRS = [
+    "./data",      # 数据目录（workspace + state）
+    "./skills",    # skill 文件目录
+]
+
+# 默认工作区（向后兼容）
+DEFAULT_WORKSPACE = "./data/workspace"
+
+
+def _get_project_root() -> Path:
+    """获取项目根目录"""
+    return Path(__file__).parent.parent.resolve()
 
 
 def _get_workspace_path() -> Path:
-    """获取工作区目录的绝对路径"""
-    # 获取项目根目录（tools 目录的父目录）
-    project_root = Path(__file__).parent.parent
-    workspace_path = project_root / WORKSPACE_DIR.lstrip("./")
-    return workspace_path.resolve()
+    """获取默认工作区目录的绝对路径（向后兼容）"""
+    project_root = _get_project_root()
+    return (project_root / DEFAULT_WORKSPACE.lstrip("./")).resolve()
 
 
 def _ensure_workspace():
-    """确保工作区目录存在，不存在则创建"""
+    """确保默认工作区目录存在"""
     workspace_path = _get_workspace_path()
     workspace_path.mkdir(parents=True, exist_ok=True)
 
@@ -28,41 +37,44 @@ def _safe_path(filename: str) -> Path:
     验证并返回安全路径
     
     安全规则：
-    1. 路径必须限制在工作区目录内
-    2. 禁止使用 ../ 或绝对路径访问工作区外的文件
-    3. 使用 os.path.realpath() 规范化路径并检查
+    1. 路径必须在白名单目录内（data/ 或 skills/）
+    2. 禁止使用 ../ 或绝对路径
+    3. 向后兼容：不以 data/ 或 skills/ 开头的路径默认在 data/workspace/ 下
     
     如果路径不安全，抛出 ValueError 异常
     """
     if not filename:
         raise ValueError("文件名不能为空")
     
-    # 规范化输入路径（移除多余的斜杠等）
+    # 规范化输入路径
     filename = filename.strip().lstrip("/")
     
-    # 如果包含 .. 或绝对路径，直接拒绝
+    # 禁止 .. 和绝对路径
     if ".." in filename or os.path.isabs(filename):
-        raise ValueError(f"禁止使用相对路径 '..' 或绝对路径访问工作区外的文件: {filename}")
+        raise ValueError(f"禁止使用相对路径 '..' 或绝对路径: {filename}")
     
-    # 获取工作区绝对路径
-    workspace_path = _get_workspace_path()
+    # 向后兼容：不以 data/ 或 skills/ 开头的路径默认在 data/workspace/ 下
+    if not filename.startswith("data/") and not filename.startswith("skills/"):
+        filename = f"data/workspace/{filename}"
+    
+    project_root = _get_project_root()
     
     # 构建完整路径
-    full_path = (workspace_path / filename).resolve()
+    full_path = (project_root / filename).resolve()
     
     # 使用 realpath 规范化路径，防止符号链接逃逸
     real_path = Path(os.path.realpath(str(full_path)))
-    real_workspace = Path(os.path.realpath(str(workspace_path)))
     
-    # 检查路径是否在工作区内
-    try:
-        # 使用 relative_to 检查路径是否在工作区内
-        real_path.relative_to(real_workspace)
-    except ValueError:
-        # relative_to 失败说明路径不在工作区内
-        raise ValueError(f"路径超出工作区范围: {filename}")
+    # 检查路径是否在任一白名单目录内
+    for allowed_dir in ALLOWED_DIRS:
+        allowed_path = Path(os.path.realpath(str(project_root / allowed_dir.lstrip("./"))))
+        try:
+            real_path.relative_to(allowed_path)
+            return real_path  # 在白名单内
+        except ValueError:
+            continue
     
-    return real_path
+    raise ValueError(f"路径超出允许范围: {filename}")
 
 
 @registry.register(
@@ -419,7 +431,7 @@ async def edit_file(filename: str, old_string: str, new_string: str, replace_all
         "type": "object",
         "properties": {
             "pattern": {"type": "string", "description": "Glob 模式，如 '*.py' 或 '**/test_*.py'"},
-            "directory": {"type": "string", "description": "搜索目录（相对于工作区，默认为空表示工作区根目录）", "default": ""}
+            "directory": {"type": "string", "description": "搜索目录（可用 data/、skills/ 前缀，默认为 data/workspace）", "default": ""}
         },
         "required": ["pattern"]
     }
@@ -431,29 +443,30 @@ async def find_files(pattern: str, directory: str = "", context=None) -> str:
     流程:
     1. 验证路径安全性
     2. 使用 pathlib.Path.glob() 查找匹配文件
-    3. 返回匹配的文件列表（相对于工作区的路径）
+    3. 返回匹配的文件列表（相对于搜索目录的路径）
     
     返回: 匹配的文件列表或错误信息
     """
     try:
         _ensure_workspace()
-        workspace_path = _get_workspace_path()
         
         # 确定搜索目录
         if not directory:
-            search_path = workspace_path
+            search_path = _get_workspace_path()
+            base_path = search_path
         else:
             search_path = _safe_path(directory)
             if not search_path.is_dir():
                 return f"错误: 目录不存在: {directory}"
+            base_path = search_path
         
         # 使用 glob 查找文件
         matches = []
         for match in search_path.glob(pattern):
             # 只返回文件，不返回目录
             if match.is_file():
-                # 返回相对于工作区的路径
-                rel_path = match.relative_to(workspace_path)
+                # 返回相对于搜索目录的路径
+                rel_path = match.relative_to(base_path)
                 matches.append(str(rel_path))
         
         if not matches:
@@ -477,7 +490,7 @@ async def find_files(pattern: str, directory: str = "", context=None) -> str:
         "type": "object",
         "properties": {
             "pattern": {"type": "string", "description": "搜索模式（支持正则表达式）"},
-            "directory": {"type": "string", "description": "搜索目录（相对于工作区）", "default": ""},
+            "directory": {"type": "string", "description": "搜索目录（可用 data/、skills/ 前缀，默认为 data/workspace）", "default": ""},
             "glob": {"type": "string", "description": "文件过滤模式，如 '*.py'", "default": "*"},
             "context_lines": {"type": "integer", "description": "显示匹配行前后的行数", "default": 2},
             "max_results": {"type": "integer", "description": "最大返回结果数", "default": 50}
@@ -506,15 +519,16 @@ async def grep_files(
     """
     try:
         _ensure_workspace()
-        workspace_path = _get_workspace_path()
         
         # 确定搜索目录
         if not directory:
-            search_path = workspace_path
+            search_path = _get_workspace_path()
+            base_path = search_path
         else:
             search_path = _safe_path(directory)
             if not search_path.is_dir():
                 return f"错误: 目录不存在: {directory}"
+            base_path = search_path
         
         # 编译正则表达式
         try:
@@ -548,8 +562,8 @@ async def grep_files(
             if not file_matches:
                 continue
             
-            # 获取相对路径
-            rel_path = file_path.relative_to(workspace_path)
+            # 获取相对路径（相对于搜索目录）
+            rel_path = file_path.relative_to(base_path)
             
             # 处理每个匹配，添加上下文
             for match_line_num, match_line in file_matches:

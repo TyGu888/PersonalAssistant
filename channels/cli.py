@@ -1,4 +1,4 @@
-from channels.base import BaseChannel, MessageHandler
+from channels.base import BaseChannel
 from core.types import IncomingMessage, OutgoingMessage
 import asyncio
 from datetime import datetime
@@ -11,15 +11,14 @@ class CLIChannel(BaseChannel):
     用于 Phase 0 开发测试，在终端中进行一问一答式对话
     """
     
-    def __init__(self, on_message: MessageHandler, user_id: str = "cli_user"):
+    def __init__(self, user_id: str = "cli_user"):
         """
         初始化 CLI Channel
         
         参数:
-        - on_message: 消息处理回调
         - user_id: 模拟的用户 ID（默认 "cli_user"）
         """
-        super().__init__(on_message)
+        super().__init__()
         self.user_id = user_id
         self.running = False
     
@@ -73,7 +72,7 @@ class CLIChannel(BaseChannel):
                 )
                 
                 # 调用消息处理回调
-                outgoing_msg = await self.on_message(incoming_msg)
+                outgoing_msg = await self.publish_message(incoming_msg)
                 
                 # 打印回复
                 print(f"Assistant: {outgoing_msg.text}")

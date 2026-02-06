@@ -1,20 +1,21 @@
 # Personal Agent Hub - 开发追踪
 
-> 最后更新: 2026-02-03
+> 最后更新: 2026-02-06
 
-快速了解项目架构和开发进展。详细技术设计见 `personal-agent-hub-design.md`。
+快速了解项目架构和开发进展。
 
 ---
 
 ## 项目简介
 
-**Personal Agent Hub** 是一个可扩展的个人 AI 助手框架：
-- 多渠道接入（CLI / Telegram / Discord / HTTP API）
-- 多 Agent 人设（学习教练、编程助手、通用助手...）
-- 可插拔 Tools（定时提醒、文件操作、Shell、网页搜索、MCP...）
+**Personal Agent Hub** 是一个 Agent-Centric 的个人 AI 助手框架：
+- Agent 是系统核心主体，自主管理记忆和决策
+- Gateway 中心枢纽（FastAPI + WebSocket + MessageBus）
+- 多渠道接入（Telegram / Discord / WebSocket CLI Client）
+- 插件式 Skills 系统（Agent 按需加载 SKILL.md）
+- 可插拔 Tools（定时提醒、文件操作、Shell、网页搜索、MCP、跨渠道消息...）
 - 长期记忆（Session 历史 + RAG 向量搜索 + 跨渠道身份统一）
-- Skills 系统（Anthropic Markdown 格式配置）
-- 进程解耦（Gateway/Agent 分离）
+- 进程解耦（Gateway/Agent 分离，Worker 进程池）
 - Docker 沙箱（容器隔离执行）
 - Sub-Agent 系统（生成子 Agent 执行复杂任务）
 
@@ -26,77 +27,101 @@
 
 ```
 personal_agent_hub/
-├── main.py              # CLI 入口
-├── config.yaml          # 配置文件
-├── Dockerfile.sandbox   # 沙箱镜像
-├── core/
-│   ├── engine.py        # 主引擎（消息调度 + 进程管理）
-│   ├── router.py        # 消息路由（规则匹配）
-│   └── types.py         # 共享类型定义
-├── channels/
-│   ├── base.py          # Channel 基类（含 ReconnectMixin）
-│   ├── cli.py           # CLI 交互
-│   ├── telegram.py      # Telegram Bot（自动重连）
-│   ├── discord.py       # Discord Bot（自动重连）
-│   └── http.py          # HTTP API (FastAPI)
-├── agents/
-│   ├── base.py          # Agent 基类（LLM + Tool + Token 管理 + 多模态）
-│   └── study_coach.py   # 学习教练 Agent
-├── tools/
-│   ├── registry.py      # Tool 注册系统（支持 MCP）
-│   ├── scheduler.py     # 智能定时提醒（auto_continue）
-│   ├── filesystem.py    # 文件操作（含 edit/find/grep）
-│   ├── shell.py         # Shell 命令（含持久化会话）
-│   ├── web.py           # 网页搜索 / 抓取
-│   ├── image.py         # 图片处理 (Pillow)
-│   ├── sandbox.py       # Docker 沙箱
-│   ├── mcp_client.py    # MCP 协议客户端
-│   ├── memory.py        # 记忆工具（search/add）
-│   └── subagent.py      # Sub-Agent 系统
-├── skills/              # Skills 配置目录
-│   ├── loader.py        # Skill 加载器
+├── main.py                    # CLI 入口（start/chat/client）
+├── config.yaml                # 配置文件
+├── Dockerfile.sandbox         # 沙箱镜像
+├── gateway/                   # Gateway 中心枢纽
+│   ├── app.py                 # Gateway 主类（系统入口）
+│   ├── bus.py                 # MessageBus（Inbox 异步队列）
+│   ├── dispatcher.py          # 出站消息路由（Channel/WebSocket）
+│   ├── channel_manager.py     # Channel 生命周期（启动/监控/重启）
+│   └── server.py              # FastAPI + WebSocket 服务
+├── agent/                     # Agent 运行时
+│   ├── loop.py                # AgentLoop（事件驱动主循环 + 周期性唤醒）
+│   ├── runtime.py             # AgentRuntime（Memory 管理 + 身份解析）
+│   ├── base.py                # BaseAgent（LLM 调用 + Tool 执行 + Token 管理）
+│   └── default.py             # DefaultAgent（通用助手 + Skill 清单注入）
+├── channels/                  # Channel Services（独立通讯服务）
+│   ├── base.py                # Channel 基类（MessageBus 集成 + ReconnectMixin）
+│   ├── cli.py                 # CLI Channel（本地调试）
+│   ├── telegram.py            # Telegram Bot（自动重连）
+│   └── discord.py             # Discord Bot（自动重连）
+├── cli_client/                # 远程 CLI 客户端
+│   └── client.py              # WebSocket CLI（类 Claude Code 风格）
+├── tools/                     # 可插拔工具
+│   ├── registry.py            # Tool 注册系统（支持 MCP）
+│   ├── channel.py             # 跨渠道消息发送（send_message）
+│   ├── scheduler.py           # 智能定时提醒（auto_continue）
+│   ├── filesystem.py          # 文件操作（edit/find/grep，支持 skills/ 和 data/）
+│   ├── shell.py               # Shell 命令（持久化会话）
+│   ├── web.py                 # 网页搜索 / 抓取
+│   ├── image.py               # 图片处理 (Pillow)
+│   ├── sandbox.py             # Docker 沙箱
+│   ├── mcp_client.py          # MCP 协议客户端
+│   ├── memory.py              # 记忆工具（search/add）
+│   └── subagent.py            # Sub-Agent 系统
+├── skills/                    # 插件式 Skills（Agent 按需加载）
+│   ├── loader.py              # Skill 加载器 + get_skill_summaries()
 │   ├── study_coach/SKILL.md
-│   ├── default/SKILL.md
-│   └── coding_assistant/SKILL.md
-├── worker/              # 进程解耦
-│   ├── agent_worker.py  # Agent Worker 进程
-│   ├── agent_client.py  # Gateway 端客户端
-│   ├── pool.py          # Worker 进程池
-│   └── protocol.py      # 通信协议
+│   ├── coding_assistant/SKILL.md
+│   └── project_manager/SKILL.md
+├── worker/                    # 进程解耦
+│   ├── agent_worker.py        # Agent Worker 进程（使用 AgentRuntime）
+│   ├── agent_client.py        # Gateway 端客户端
+│   ├── pool.py                # Worker 进程池
+│   └── protocol.py            # 通信协议
+├── core/                      # 共享模块
+│   ├── types.py               # 类型定义（Message, Envelope, Route 等）
+│   └── router.py              # 消息路由（选择 Tools）
+├── memory/                    # 记忆系统
+│   ├── session.py             # 对话历史（SQLite）
+│   ├── global_mem.py          # 长期记忆（ChromaDB 向量）
+│   └── manager.py             # Memory 统一入口
 ├── utils/
-│   └── token_counter.py # Token 计数器 (tiktoken)
-├── memory/
-│   ├── session.py       # 对话历史（SQLite）
-│   ├── global_mem.py    # 长期记忆（ChromaDB 向量）
-│   └── manager.py       # Memory 统一入口
-└── data/                # 运行时数据
+│   └── token_counter.py       # Token 计数器 (tiktoken)
+└── data/                      # 运行时数据（含 state/ 状态文件）
 ```
 
-### 消息流
+### 消息流（Agent-Centric）
 
 ```
-Channel (CLI/Telegram/Discord/HTTP)
+Channel/Client 收到消息
     │
-    ▼ IncomingMessage
-Engine.handle()
-    ├── Router.resolve() → 选择 Agent + Tools
-    ├── MemoryManager.get_context() → 历史 + 记忆 (Token 截断)
-    ├── Agent.run() → LLM 处理 + Tool 调用 (可在 Worker 进程执行)
-    └── MemoryManager.save() → 保存对话
+    ▼ publish(IncomingMessage)
+MessageBus (asyncio.Queue Inbox)
     │
-    ▼ OutgoingMessage
-Channel.send() → 用户
+    ▼ consume() / consume_timeout()
+AgentLoop
+    ├── AgentRuntime.save_message("user", ...) → 保存用户消息
+    ├── Router.resolve() → 选择 Tools
+    ├── AgentRuntime.load_context() → 历史 + 记忆 (Token 截断)
+    ├── BaseAgent.run() → LLM 处理 + Tool 调用
+    │       └── 根据 Skill 清单按需加载 SKILL.md
+    ├── AgentRuntime.save_message("assistant", ...) → 保存回复
+    └── Dispatcher.dispatch_reply(envelope, response)
+          ├── reply_future.set_result() → 同步客户端（HTTP/WS）
+          └── channel.send() → 异步渠道（Discord/Telegram）
 ```
 
-### 进程解耦架构
+### 与旧架构对比
 
 ```
-Gateway 进程 (主进程)               Agent Worker 进程 (子进程 ×N)
-├── Engine (消息路由)                ├── AgentWorker (任务接收)
-├── Channels (TG/Discord/HTTP)       ├── BaseAgent (LLM 调用)
-├── Scheduler                        ├── ToolRegistry (Tool 执行)
-└── AgentClient (发任务)  ──IPC──►  └── MemoryManager (记忆访问)
+旧架构: Channel ──callback──► Engine.handle() ──► Agent.run()
+                               (Engine 管 Memory)
+
+新架构: Channel ──publish──► MessageBus ──► AgentLoop ──► Dispatcher
+                                           (Agent 管 Memory)
 ```
+
+| 概念 | 旧（Engine-Centric） | 新（Agent-Centric） |
+|------|----------------------|---------------------|
+| 中心 | Engine | Agent (AgentLoop) |
+| 消息传递 | 回调函数 (on_message) | MessageBus (asyncio.Queue) |
+| Memory 归属 | Engine 管理 | Agent 自己管理 (AgentRuntime) |
+| Channel 角色 | 主动调用 Engine | 独立服务，发布到 Bus |
+| HTTP/WS | HTTPChannel (独立 Channel) | GatewayServer (Gateway 的一部分) |
+| CLI | 内嵌 Channel | 独立 WebSocket Client |
+| 主动发消息 | 无 | send_message Tool |
 
 ---
 
@@ -104,36 +129,37 @@ Gateway 进程 (主进程)               Agent Worker 进程 (子进程 ×N)
 
 | 模块 | 职责 |
 |------|------|
-| **core/engine.py** | 主引擎，消息调度，Channel 监控重连，进程池管理 |
-| **core/router.py** | 根据规则（关键词/正则）决定消息由哪个 Agent 处理 |
-| **core/types.py** | 共享数据结构：IncomingMessage, OutgoingMessage 等 |
-| **channels/base.py** | Channel 抽象接口 + ReconnectMixin（指数退避重连） |
-| **channels/http.py** | FastAPI HTTP API：/chat, /health, /agents, /tools |
-| **agents/base.py** | Agent 基类，LLM 调用 + Tool 执行 + Token 管理 + 多模态 |
+| **gateway/app.py** | Gateway 主类，初始化和管理所有组件的生命周期 |
+| **gateway/bus.py** | MessageBus，Inbox 异步队列 + MessageEnvelope（含 reply Future） |
+| **gateway/dispatcher.py** | 出站消息路由，注册 Channel send 函数和 WebSocket 连接 |
+| **gateway/channel_manager.py** | Channel 创建、Bus 注入、启动监控、指数退避重启 |
+| **gateway/server.py** | FastAPI 服务：POST /chat, WS /ws, 管理端点 |
+| **agent/loop.py** | Agent 事件驱动主循环，从 Bus 取消息，调用 Agent，分发回复 |
+| **agent/runtime.py** | Agent 运行时：持有 MemoryManager，加载上下文，身份解析 |
+| **agent/base.py** | BaseAgent：LLM 调用 + Tool 执行 + Token 管理 + 多模态 |
+| **agent/default.py** | DefaultAgent：通用助手，Skill 清单注入 |
+| **channels/base.py** | Channel 基类：publish_message() + ReconnectMixin |
+| **tools/channel.py** | send_message 工具：Agent 主动向任意 Channel 发消息 |
 | **tools/registry.py** | Tool 注册装饰器，支持本地函数和 MCP 工具 |
-| **tools/shell.py** | Shell 命令执行 + 持久化会话 (ShellSession) |
-| **tools/sandbox.py** | Docker 沙箱，容器隔离执行 |
-| **tools/mcp_client.py** | MCP 协议客户端，连接外部 MCP Server |
-| **tools/image.py** | 图片处理：压缩、格式转换、Vision API 集成 |
-| **tools/memory.py** | 记忆工具：memory_search（主动搜索）、memory_add（主动添加） |
-| **tools/subagent.py** | Sub-Agent 系统：agent_spawn、agent_list、agent_send、agent_history |
-| **skills/loader.py** | 加载 SKILL.md 文件（Anthropic Markdown 格式） |
-| **worker/pool.py** | Worker 进程池，管理 Agent 子进程 |
-| **utils/token_counter.py** | tiktoken Token 计数器 |
-| **memory/manager.py** | 统一入口，Token 截断上下文 |
+| **cli_client/client.py** | WebSocket CLI 客户端，类 Claude Code 风格 |
+| **worker/agent_worker.py** | Worker 进程，使用 AgentRuntime 替代直接 MemoryManager |
+| **core/types.py** | 共享类型：IncomingMessage, OutgoingMessage, MessageEnvelope |
+| **core/router.py** | 消息路由（选择 Tools，Agent 统一为 default） |
+| **skills/loader.py** | 插件式 Skill 加载器，get_skill_summaries() |
+| **memory/manager.py** | Memory 统一入口，Token 截断上下文 |
 
 ---
 
 ## 扩展指南
 
-### 添加新 Skill（推荐方式）
+### 添加新 Skill（插件式）
 
 在 `skills/` 下创建目录和 `SKILL.md`：
 
 ```markdown
 ---
 name: my_skill
-description: 技能简短描述
+description: 技能简短描述（会显示在 Skill 清单中）
 metadata:
   emoji: "🎯"
   requires:
@@ -147,10 +173,9 @@ metadata:
 ## 核心职责
 - 职责 1
 - 职责 2
-
-## 交互风格
-语气要...
 ```
+
+**状态文件**：Skill 可以在 `data/state/` 目录下维护状态文件，通过 filesystem 工具读写。
 
 ### 添加新 Tool
 
@@ -163,26 +188,15 @@ from tools.registry import registry
     parameters={...}
 )
 async def my_tool(arg1: str, context=None) -> str:
-    engine = context["engine"]  # 依赖注入
+    runtime = context["runtime"]    # AgentRuntime 引用
+    dispatcher = context["dispatcher"]  # Dispatcher 引用
+    memory = context["memory"]      # MemoryManager 引用
     return "结果"
 ```
 
 ### 添加新 Channel
 
-继承 `BaseChannel`，Channel 基类已内置自动重连（指数退避 5s → 300s）。
-
-### 使用 MCP 工具
-
-```yaml
-mcp:
-  enabled: true
-  servers:
-    - name: filesystem
-      command: npx
-      args: ["-y", "@modelcontextprotocol/server-filesystem", "./data"]
-```
-
-路由中使用：`tools: [web_search, mcp:*]` 或 `mcp:filesystem:*`
+继承 `BaseChannel`，实现 `start()`, `send()`, `stop()`。使用 `self.publish_message(msg)` 发布到 MessageBus。ChannelManager 自动注入 Bus 和注册 Dispatcher。
 
 ---
 
@@ -191,69 +205,68 @@ mcp:
 ### LLM
 
 ```yaml
+llm_profiles:
+  ark_doubao:
+    api_key: ${ARK_API_KEY}
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    model: ep-xxx
+    extra_params:
+      reasoning_effort: medium
+
 llm:
-  api_key: ${ARK_API_KEY}
-  base_url: https://ark.cn-beijing.volces.com/api/v3
-  model: ep-20260128095801-jc4gx
-  max_context_tokens: 8000
+  active: ark_doubao
+  max_context_tokens: 16000
 ```
 
-### 进程模式
+### Gateway
 
 ```yaml
-engine:
-  process_mode: "embedded"   # "embedded" 或 "separated"
-  num_workers: 2
+gateway:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+  api_key: ${HTTP_API_KEY}
 ```
 
-- **process_mode**
-  - `embedded`：Agent 在主进程里跑，适合开发调试、单机轻量。
-  - `separated`：Agent 在独立 Worker 子进程里跑，Gateway 只做路由和 Channel，适合生产、多请求并发。
-- **num_workers**（仅 `separated` 时生效）
-  - Worker 进程数量。每个请求会分配到一个空闲 Worker 执行（LLM + Tools）。
-  - 数量越大：并发能力越强（多用户/多消息同时处理），但内存占用越高（每个 Worker 一份 LLM 客户端和 Tools）。
-  - 建议：开发/单用户 1～2，多用户可调到 4 或以上，按机器内存调整。
+### Agent
+
+```yaml
+agent:
+  wake_interval: 0  # 周期性唤醒（秒），0 = 仅事件驱动
+```
 
 ### 测试指南
 
-大更新后建议按下面顺序测，先保证主流程再测分离模式。
-
-1. **快速单条对话（不启 Worker 池）**
+1. **快速单条对话**
    ```bash
    python main.py chat "你好"
-   python main.py chat "提醒我明天 9 点开会"   # 测 scheduler 路由
    ```
-   说明：`chat` 命令不会执行 `engine.run()`，因此不会启动 Worker 池；即使配置了 `process_mode: separated`，这一条也会走内嵌逻辑，用于快速验证路由、Agent、Tools 是否正常。
 
-2. **内嵌模式完整跑一遍**
-   - 在 `config.yaml` 里设 `process_mode: "embedded"`。
-   - 启动服务：`python main.py start`。
-   - 用当前已开启的 Channel 发消息（例如 Discord），测多轮对话、定时提醒、Tool 调用等。
+2. **完整启动（Gateway + Channels + Agent）**
+   ```bash
+   python main.py start
+   ```
+   通过 Discord 发消息测试多轮对话、Tool 调用等。
 
-3. **分离模式（Worker 池）**
-   - 在 `config.yaml` 里设 `process_mode: "separated"`，`num_workers: 2`（或 1 先试）。
-   - 启动：`python main.py start`，看日志里是否有 `Starting WorkerPool with N workers`、`WorkerPool started`。
-   - 再通过 Discord/Telegram/HTTP 发消息，确认回复正常；可同时发多条或多个会话，观察是否由不同 Worker 处理（日志里会有 worker 相关输出）。
+3. **CLI Client 测试（WebSocket）**
+   - 终端 1: `python main.py start`
+   - 终端 2: `python main.py client`
 
 4. **按功能抽查**
-   - 学习/复习/督促 → 走 study_coach + scheduler。
-   - 搜索/网页 → default + web_search / fetch_url。
-   - 执行/命令/沙箱 → run_command、sandbox_*。
-   - 提醒/定时 → scheduler_add/list/cancel。
-   - 兜底句 → default + 全 tools。
-
-环境变量：确保 `.env` 或本机已设置 `ARK_API_KEY`，若开 Telegram/Discord/HTTP 则对应 token 也需配置。
+   - 学习/复习 → DefaultAgent 加载 study_coach Skill
+   - 搜索/网页 → web_search / fetch_url
+   - 执行/命令 → run_command, sandbox_*
+   - 提醒/定时 → scheduler_add/list/cancel
+   - 跨渠道发消息 → send_message Tool
+   - 项目管理 → DefaultAgent 加载 project_manager Skill
 
 ### 路由规则
 
-| 匹配关键词 | Agent | Tools |
-|-----------|-------|-------|
-| 学习/复习/督促 | study_coach | scheduler |
-| 搜索/查找/网页 | default | web_search, fetch_url |
-| 执行/运行/命令/沙箱 | default | run_command, sandbox_* |
-| 创建/写入/文件 | default | filesystem 相关 |
-| 提醒/定时/闹钟 | default | scheduler 相关 |
-| 兜底 | default | 全部 tools |
+| 消息 | Agent | Tools |
+|------|-------|-------|
+| 所有消息 | default | 全部 tools（含 send_message） |
+
+> Agent 根据 Skill 清单按需加载能力。
 
 ---
 
@@ -263,43 +276,54 @@ engine:
 
 | 类别 | 模块 | 状态 |
 |------|------|------|
-| **Core** | engine, router, types | ✅ |
-| **Channels** | CLI, Telegram, Discord, HTTP | ✅ |
-| **Agents** | base (Token + 多模态), study_coach | ✅ |
-| **Tools** | registry, scheduler, filesystem, shell, web, image, sandbox, mcp_client, discord, memory, subagent | ✅ |
+| **Gateway** | app, bus, dispatcher, channel_manager, server | ✅ |
+| **Agent** | loop, runtime, base, default | ✅ |
+| **Channels** | CLI, Telegram, Discord | ✅ |
+| **Tools** | registry, channel, scheduler, filesystem, shell, web, image, sandbox, mcp_client, memory, subagent | ✅ |
 | **Memory** | session, global_mem (scope + person_id), manager (Token 截断 + Identity Mapping) | ✅ |
-| **Skills** | loader, study_coach, default, coding_assistant | ✅ |
-| **Worker** | agent_worker, agent_client, pool, protocol | ✅ |
+| **Skills** | loader (插件式), study_coach, coding_assistant, project_manager | ✅ |
+| **Worker** | agent_worker (使用 AgentRuntime), agent_client, pool, protocol | ✅ |
+| **CLI Client** | WebSocket CLI (类 Claude Code) | ✅ |
+| **Core** | types (含 MessageEnvelope), router | ✅ |
 | **Utils** | token_counter | ✅ |
 
 ### 已验证功能
 
-- [x] CLI 模式对话
-- [x] 火山引擎 API 调用（OpenAI 兼容）
-- [x] 消息路由（关键词匹配）
+- [x] Gateway 构造和组件初始化
+- [x] MessageBus：publish/consume/wait_reply/timeout
+- [x] Dispatcher：Channel 路由 + Future 回复
+- [x] 端到端消息流（Gateway → AgentLoop → Agent → Dispatcher）
+- [x] 火山引擎/DeepSeek API 调用（OpenAI 兼容）
+- [x] 消息路由
 - [x] Tool 注册与执行（依赖注入）
 - [x] 对话历史保存（SQLite）
 - [x] 向量记忆搜索（ChromaDB）
 - [x] 智能定时提醒（auto_continue）
 - [x] Discord / Telegram Bot 集成
 - [x] Channel 自动重连（指数退避）
-- [x] Skills 配置化加载
+- [x] Skills 插件式加载
 - [x] Token 精确计数与截断
-- [x] HTTP API (FastAPI)
+- [x] FastAPI + WebSocket Gateway
 - [x] 多模态图片处理
 - [x] 持久化 Shell 会话
 - [x] Docker 沙箱执行
 - [x] MCP 协议接入
-- [x] 进程解耦（Gateway/Agent 分离）
 - [x] 世界信息传递（channel, user_id, timestamp, is_owner）
-- [x] NO_REPLY 机制（Agent 可选择不回复）
+- [x] NO_REPLY 机制
 - [x] Channel Tools（channel_tools 配置自动加载）
-- [x] Discord Tools（send, reply, reaction, thread）
-- [x] 跨渠道身份统一（Identity Mapping: user_id → person_id）
+- [x] 跨渠道身份统一（Identity Mapping）
 - [x] 记忆分层（Memory Scope: global + personal）
-- [x] 文件精确编辑（edit_file, find_files, grep_files）
 - [x] Memory Tools（Agent 主动搜索/添加记忆）
-- [x] Sub-Agent 系统（agent_spawn, agent_list, agent_send, agent_history）
+- [x] Sub-Agent 系统
+- [x] send_message Tool（Agent 主动跨渠道发消息）
+- [x] CLI Client（WebSocket 连接 Gateway）
+
+### 待测试
+
+- [ ] Discord Channel 在新架构下的完整对话
+- [ ] CLI Client 连接 Gateway 交互
+- [ ] 周期性唤醒 (wake_interval > 0)
+- [ ] Worker 分离模式在新架构下运行
 
 ---
 
@@ -307,25 +331,31 @@ engine:
 
 | 日期 | 更新内容 |
 |------|----------|
-| 2026-02-03 | Sub-Agent 系统：agent_spawn、agent_list、agent_send、agent_history |
-| 2026-02-03 | Memory Tools：memory_search（主动搜索）、memory_add（主动添加） |
-| 2026-02-03 | Memory 框架重构：Identity Mapping（跨渠道身份统一）+ Memory Scope（global/personal） |
-| 2026-02-03 | 文件工具增强：edit_file（精确替换）、find_files（Glob 查找）、grep_files（内容搜索） |
-| 2026-01-31 | Channel-Agent 架构改进：世界信息传递、Owner 识别、NO_REPLY 机制 |
-| 2026-01-31 | Channel Tools 机制：channel_tools 配置，自动合并到路由 |
-| 2026-01-31 | Discord Tools：send_message, reply_message, add_reaction, create_thread |
-| 2026-01-30 | 进程解耦：Gateway/Agent 分离，Worker 进程池 |
-| 2026-01-30 | MCP 协议接入：连接外部 MCP Server |
-| 2026-01-30 | Docker 沙箱：容器隔离执行 Shell 命令 |
-| 2026-01-30 | HTTP API：FastAPI 实现 RESTful 接口 |
-| 2026-01-30 | 多模态支持：Pillow 图片处理 + Vision API |
-| 2026-01-30 | 持久化 Shell：有状态 Shell 会话 |
-| 2026-01-30 | Token 管理：tiktoken 精确计数与截断 |
-| 2026-01-30 | Skills 配置化：Anthropic Markdown 格式 |
-| 2026-01-30 | Channel 自动重连：指数退避重连机制 |
-| 2026-01-29 | Scheduler 智能化：`auto_continue` 参数 |
-| 2026-01-29 | 新增 Discord Channel |
-| 2026-01-28 | 初始版本，完成 Phase 0 核心功能 |
+| 2026-02-06 | **架构重构：Agent-Centric**。MessageBus 解耦 Channel 和 Agent；Agent 自主管理 Memory；Gateway 替代 Engine；FastAPI + WebSocket 服务；CLI Client；send_message Tool |
+| 2026-02-05 | Skill 系统重构：从 Agent 替换模式改为插件式按需加载 |
+| 2026-02-05 | Filesystem 路径扩展：支持访问 skills/ 和 data/ 目录 |
+| 2026-02-05 | 简化路由：所有消息统一给 DefaultAgent + 全部 Tools |
+| 2026-02-04 | 多 Provider Profile：llm_profiles 配置 |
+| 2026-02-04 | Project Manager Skill |
+| 2026-02-03 | Sub-Agent 系统 + Memory Tools + 记忆框架重构 |
+| 2026-02-03 | 文件工具增强：edit_file、find_files、grep_files |
+| 2026-01-31 | Channel-Agent 架构改进：世界信息、Owner 识别、NO_REPLY |
+| 2026-01-30 | 进程解耦 + MCP + Docker 沙箱 + HTTP API + 多模态 |
+| 2026-01-29 | Scheduler 智能化 + Discord Channel |
+| 2026-01-28 | 初始版本 |
+
+---
+
+## 已删除的旧文件
+
+以下文件在 Agent-Centric 重构中被替代和删除：
+
+| 旧文件 | 替代为 |
+|--------|--------|
+| `core/engine.py` | `gateway/app.py` |
+| `channels/http.py` | `gateway/server.py` |
+| `agents/base.py` | `agent/base.py` |
+| `agents/study_coach.py` | `agent/default.py` |
 
 ---
 
@@ -348,6 +378,7 @@ Pillow>=10.0.0
 tiktoken>=0.5.0
 fastapi>=0.100.0
 uvicorn>=0.23.0
+websockets>=12.0
 docker>=6.0.0
 ```
 
@@ -360,90 +391,12 @@ docker>=6.0.0
 | 方向 | 说明 |
 |------|------|
 | 智能路由 | 用 LLM (Meta-Agent) 动态决定路由 |
+| 唤醒 Agent | 小 LLM 控制主 Agent 是否唤醒（待评估） |
 | 微信 Channel | 个人微信 / 企业微信接入 |
 | cron 增强 | 完整 cron 表达式、recurring jobs |
 | 后台进程管理 | process_start, process_list, process_kill |
-| 统一消息工具 | 跨渠道 message 工具 |
 | 无头浏览器 | browser_* (Playwright) |
-
----
-
-## 已完成: Tool 能力对齐 clawdbot (2026-02-03)
-
-> 目标：将 PersonalAssistant 的工具能力与 clawdbot 对齐，实现操作系统级的 Agent 能力
-
-### 已实现工具
-
-| 类别 | 工具 | 说明 |
-|------|------|------|
-| **文件操作** | `edit_file` | 精确字符串替换（类似 StrReplace） |
-| **文件操作** | `find_files` | Glob 模式查找文件 |
-| **文件操作** | `grep_files` | 搜索文件内容（正则 + 上下文） |
-| **记忆** | `memory_search` | Agent 主动搜索记忆（支持 scope 过滤） |
-| **记忆** | `memory_add` | Agent 主动添加记忆（支持 global/personal） |
-| **Sub-Agent** | `agent_spawn` | 生成子 Agent 执行任务（同步/异步） |
-| **Sub-Agent** | `agent_list` | 列出子 Agent 状态 |
-| **Sub-Agent** | `agent_send` | 给子 Agent 发消息 |
-| **Sub-Agent** | `agent_history` | 获取子 Agent 对话历史 |
-
-### 待实现工具
-
-| 类别 | 工具 | 说明 |
-|------|------|------|
-| **定时任务** | `cron_*` | 完整 cron 表达式支持 |
-| **进程管理** | `process_*` | 后台进程管理 |
-| **消息** | `message` | 统一跨渠道消息工具 |
-| **浏览器** | `browser_*` | 无头浏览器控制（Playwright） |
-
----
-
-## 已完成: 记忆框架重构 (2026-02-03)
-
-### 实现内容
-
-**1. Identity Mapping（跨渠道身份统一）**
-
-- 配置：`memory.identity_mode: "single_owner"` 或 `"multi_user"`
-- `single_owner` 模式：所有 allowed_users 映射到同一个 `person_id`（"owner"）
-- 代码：`core/engine.py` 添加 `_resolve_person_id()` 方法
-
-**2. Memory Scope（记忆分层）**
-
-- `global`：环境信息，所有对话可检索
-- `personal`：用户相关记忆，跨渠道共享
-- 代码改动：
-  - `core/types.py`：MemoryItem 添加 `person_id` 和 `scope` 字段
-  - `memory/global_mem.py`：add/search 支持 scope 过滤
-  - `memory/manager.py`：get_context 使用 person_id
-
-**3. Memory Tools**
-
-- `memory_search`：Agent 主动搜索记忆
-- `memory_add`：Agent 主动添加记忆
-
-### 配置示例
-
-```yaml
-memory:
-  identity_mode: "single_owner"  # "single_owner" | "multi_user"
-  max_context_messages: 50
-  max_context_tokens: 16000
-```
-
-### 未来扩展：Team Assistant
-
-支持多 person_id 映射：
-```yaml
-identity:
-  mapping:
-    - person_id: alice
-      channels:
-        discord: ["123456"]
-        telegram: ["789"]
-    - person_id: bob
-      channels:
-        discord: ["654321"]
-```
+| Mac/iOS Client | 远程 Client 通过 WebSocket 执行本地操作 |
 
 ### 中期
 
@@ -459,3 +412,4 @@ identity:
 |------|------|
 | Multi-Agent | 多 Agent 协作（Planner → Coder → Reviewer） |
 | 分布式部署 | Gateway 云端 + Agent 本地 |
+| 图记忆 | Knowledge Graph 增强记忆系统 |

@@ -1,3 +1,5 @@
+import asyncio
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Any
@@ -82,3 +84,18 @@ class ToolResult:
     success: bool
     output: str
     error: Optional[str] = None
+
+# ===== MessageBus 相关 =====
+
+@dataclass
+class MessageEnvelope:
+    """
+    消息信封 - 包装 IncomingMessage + 回复机制
+    
+    用于 MessageBus 内部传递。每个入站消息包装成 Envelope，
+    附带一个 asyncio.Future 以便发送方等待回复。
+    """
+    message: IncomingMessage
+    reply_future: Optional[asyncio.Future] = None  # 调用方可 await 获取 OutgoingMessage
+    envelope_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: datetime = field(default_factory=datetime.utcnow)

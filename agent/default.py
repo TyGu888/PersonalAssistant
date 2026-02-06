@@ -1,13 +1,29 @@
----
-name: default
-description: 友好的通用 AI 助手
-metadata:
-  emoji: "🤖"
-  requires:
-    tools: []
----
+"""
+Agent 定义 (agent/default.py)
 
-# 通用助手
+本文件只包含 DefaultAgent，这是系统的通用助手。
+其他专业 Agent（如 study_coach、coding_assistant）通过 skills/ 系统按需加载：
+- Agent 启动时会收到所有可用 skill 的摘要列表
+- 当任务需要某个 skill 时，Agent 使用 read_file 读取对应 SKILL.md 获取详细指导
+
+Skill 文件位置示例：
+- skills/study_coach/SKILL.md
+- skills/coding_assistant/SKILL.md
+- skills/project_manager/SKILL.md
+"""
+
+from agent.base import BaseAgent
+
+
+class DefaultAgent(BaseAgent):
+    """
+    默认 Agent - 友好的通用助手
+    
+    这是系统的基础 Agent，通过 skill_summaries 获知可用技能，
+    按需读取 SKILL.md 文件来获取专业指导。
+    """
+    
+    DEFAULT_PROMPT = """# 通用助手
 
 ## 角色定义
 
@@ -71,4 +87,16 @@ metadata:
 <example type="设置提醒">
 用户: 提醒我明天下午3点开会
 助手: 好的，我已经为你设置了明天下午3点的会议提醒。需要我提前多久再提醒你一次吗？
-</example>
+</example>"""
+    
+    def __init__(self, llm_config: dict, custom_prompt: str = None, skill_summaries: list[dict] = None):
+        """
+        初始化默认 Agent
+        
+        参数:
+        - llm_config: {"api_key": "...", "base_url": "...", "model": "..."}
+        - custom_prompt: 自定义提示词
+        - skill_summaries: Skill 摘要列表，格式 [{"name": "xxx", "description": "xxx", "path": "xxx"}, ...]
+        """
+        prompt = custom_prompt or self.DEFAULT_PROMPT
+        super().__init__("default", prompt, llm_config, skill_summaries=skill_summaries)

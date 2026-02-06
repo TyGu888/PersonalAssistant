@@ -8,7 +8,7 @@ Agent Worker - 运行在子进程中
 4. 返回 AgentResponse
 
 注意:
-- Worker 进程有独立的 MemoryManager、Agent 实例
+- Worker 进程有独立的 AgentRuntime（含 MemoryManager）和 Agent 实例
 - Tool 中的 send_push 会被转换为 pending_pushes 返回给 Gateway
 """
 
@@ -103,8 +103,9 @@ class WorkerToolContext:
     - pending_scheduler_ops: scheduler 操作（add_job, remove_job 等）
     """
     
-    def __init__(self, memory, scheduler_proxy=None):
+    def __init__(self, memory, scheduler_proxy=None, runtime=None):
         self.memory = memory
+        self.runtime = runtime
         self.pending_attachments: list[str] = []
         self.pending_pushes: list[PendingPush] = []
         self.pending_scheduler_ops: list[dict] = []
@@ -134,6 +135,7 @@ class WorkerToolContext:
         
         return {
             "engine": mock_engine,
+            "runtime": self.runtime,
             "scheduler": self.scheduler_proxy,
             "memory": self.memory,
             "pending_attachments": self.pending_attachments
@@ -156,7 +158,7 @@ class AgentWorker:
         self.conn = conn  # 与 Gateway 的连接
         self.worker_id = worker_id
         self.agents: dict = {}
-        self.memory = None
+        self.runtime = None
         self.running = True
         
         # 设置信号处理
@@ -230,11 +232,11 @@ class AgentWorker:
     async def _init_components(self):
         """初始化 Agent、Registry、Memory 等组件"""
         # 导入必要模块（在子进程中导入，避免序列化问题）
-        from memory.manager import MemoryManager
-        from agents.base import BaseAgent
-        from agents.study_coach import StudyCoachAgent, DefaultAgent
+        from agent.runtime import AgentRuntime
+        from agent.base import BaseAgent
+        from agent.default import DefaultAgent
         from tools.registry import registry
-        from skills.loader import load_skills
+        from skills.loader import load_skills, get_skill_summaries
         
         # 导入 tools 以触发装饰器注册
         import tools.scheduler
@@ -243,46 +245,37 @@ class AgentWorker:
         import tools.shell
         import tools.image
         
-        # 初始化 MemoryManager
+        # 初始化 AgentRuntime（替代直接创建 MemoryManager）
         data_dir = self.config.get("data", {}).get("dir", "./data")
         llm_config = self._get_llm_config()
         memory_config = self.config.get("memory", {})
-        self.memory = MemoryManager(data_dir, llm_config, memory_config)
+        identity_mode = memory_config.get("identity_mode", "single_owner")
+        
+        self.runtime = AgentRuntime(
+            memory_config=memory_config,
+            llm_config=llm_config,
+            data_dir=data_dir,
+            identity_mode=identity_mode
+        )
         
         # 加载 Skills
         skills_config = self.config.get("skills", {})
         skills_dir = skills_config.get("dir", "./skills")
         skills = load_skills(skills_dir)
         
-        # 初始化 Agents
-        # study_coach
-        study_coach_prompt = self._get_skill_prompt(
-            skills, "study_coach", 
-            fallback_prompt=StudyCoachAgent.DEFAULT_PROMPT
-        )
-        self.agents["study_coach"] = StudyCoachAgent(
-            llm_config=llm_config,
-            custom_prompt=study_coach_prompt
-        )
+        # 检查 overrides
+        overrides = skills_config.get("overrides", {})
+        for skill_name, override_cfg in overrides.items():
+            if not override_cfg.get("enabled", True):
+                skills.pop(skill_name, None)
         
-        # default
-        default_prompt = self._get_skill_prompt(
-            skills, "default",
-            fallback_prompt=DefaultAgent.DEFAULT_PROMPT
-        )
+        skill_summaries = get_skill_summaries(skills)
+        
+        # 初始化 DefaultAgent
         self.agents["default"] = DefaultAgent(
             llm_config=llm_config,
-            custom_prompt=default_prompt
+            skill_summaries=skill_summaries
         )
-        
-        # 为其他 Skills 创建 Agent
-        for skill_name, skill in skills.items():
-            if skill_name not in self.agents:
-                self.agents[skill_name] = BaseAgent(
-                    agent_id=skill_name,
-                    system_prompt=skill.prompt,
-                    llm_config=llm_config
-                )
         
         # 保存 registry 引用
         self.registry = registry
@@ -299,22 +292,6 @@ class AgentWorker:
             "max_context_tokens": llm_cfg.get("max_context_tokens", 8000),
             "max_response_tokens": llm_cfg.get("max_response_tokens")
         }
-    
-    def _get_skill_prompt(self, skills: dict, skill_name: str, fallback_prompt: str = None) -> str:
-        """获取 Skill 的 prompt"""
-        # 检查 config.yaml 中是否有覆盖的 prompt
-        agents_config = self.config.get("agents", {})
-        agent_cfg = agents_config.get(skill_name, {})
-        config_prompt = agent_cfg.get("prompt")
-        
-        if config_prompt:
-            return config_prompt
-        
-        # 检查是否有对应的 Skill 文件
-        if skill_name in skills:
-            return skills[skill_name].prompt
-        
-        return fallback_prompt or ""
     
     async def _handle_request(self, request: AgentRequest) -> AgentResponse:
         """处理单个 AgentRequest"""
@@ -344,8 +321,11 @@ class AgentWorker:
             # 获取 Tool schemas
             tools = self.registry.get_schemas(request.tool_names)
             
-            # 创建 Worker 端的 tool_context
-            worker_context = WorkerToolContext(memory=self.memory)
+            # 创建 Worker 端的 tool_context（使用 runtime 的 memory）
+            worker_context = WorkerToolContext(
+                memory=self.runtime.memory,
+                runtime=self.runtime
+            )
             tool_context = worker_context.to_dict()
             
             # 运行 Agent（传递 msg_context）

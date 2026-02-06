@@ -2,36 +2,56 @@ from openai import AsyncOpenAI
 from core.types import ChatMessage, ToolResult
 from tools.registry import registry
 from utils.token_counter import TokenCounter
+import asyncio
 import json
 import logging
+import time
 from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
 
 class BaseAgent:
-    def __init__(self, agent_id: str, system_prompt: str, llm_config: dict):
+    def __init__(self, agent_id: str, system_prompt: str, llm_config: dict, skill_summaries: list[dict] = None):
         """
         初始化 Agent
         
         参数:
         - agent_id: Agent 标识 (如 "study_coach", "default")
         - system_prompt: 系统提示词
-        - llm_config: {"api_key": "...", "base_url": "...", "model": "...", "max_context_tokens": 8000}
+        - llm_config: {
+            "api_key": "...", 
+            "base_url": "...", 
+            "model": "...", 
+            "max_context_tokens": 8000,
+            "extra_params": {...},  # 直接传给 API 的额外参数
+            "features": {...}       # 需要代码处理的特性
+          }
+        - skill_summaries: Skill 摘要列表，格式 [{"name": "xxx", "description": "xxx", "path": "xxx"}, ...]
         """
         self.agent_id = agent_id
         self.system_prompt = system_prompt
+        self.skill_summaries = skill_summaries
         self.model = llm_config.get("model", "gpt-4o")
         
         # Token 计数器和上下文限制
         self.token_counter = TokenCounter(self.model)
-        self.max_context_tokens = llm_config.get("max_context_tokens", 8000)  # 留出响应空间
-        self.max_response_tokens = llm_config.get("max_response_tokens")  # 可选：限制响应长度
+        self.max_context_tokens = llm_config.get("max_context_tokens", 8000)
+        self.max_response_tokens = llm_config.get("max_response_tokens")
+        
+        # Provider 特定配置
+        self.extra_params = llm_config.get("extra_params", {})
+        self.features = llm_config.get("features", {})
         
         # 支持火山引擎等自定义 base_url
         client_kwargs = {"api_key": llm_config.get("api_key")}
         if llm_config.get("base_url"):
             client_kwargs["base_url"] = llm_config.get("base_url")
+        
+        # 超时配置：60 秒超时，自动重试 2 次
+        client_kwargs["timeout"] = 60.0
+        client_kwargs["max_retries"] = 2
+        
         self.client = AsyncOpenAI(**client_kwargs)
     
     async def run(
@@ -102,7 +122,7 @@ class BaseAgent:
             logger.debug(f"上下文 token 数: {total_tokens}/{self.max_context_tokens}")
         
         # 最大 tool_calls 循环次数
-        max_iterations = 10
+        max_iterations = 20
         iteration = 0
         
         # 构建 LLM 调用参数
@@ -115,17 +135,50 @@ class BaseAgent:
         if self.max_response_tokens:
             llm_kwargs["max_tokens"] = self.max_response_tokens
         
+        # 合并 extra_params（如 reasoning_effort）
+        if self.extra_params:
+            llm_kwargs.update(self.extra_params)
+        
+        # 是否需要保留 reasoning_content（DeepSeek Reasoner）
+        preserve_reasoning = self.features.get("preserve_reasoning_content", False)
+        
+        # 总超时时间（秒）：单次 API 调用最多等这么久（包括 DeepSeek 思考时间）
+        api_call_timeout = 120
+        
         while iteration < max_iterations:
-            # 调用 LLM
-            response = await self.client.chat.completions.create(**llm_kwargs)
+            # 调用 LLM（带总超时保护）
+            logger.info(f"LLM 调用开始 (iteration={iteration})")
+            t0 = time.monotonic()
+            try:
+                response = await asyncio.wait_for(
+                    self.client.chat.completions.create(**llm_kwargs),
+                    timeout=api_call_timeout
+                )
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - t0
+                logger.error(f"LLM 调用总超时 ({elapsed:.1f}s > {api_call_timeout}s)")
+                return "抱歉，AI 响应超时，请稍后重试。"
+            except Exception as e:
+                elapsed = time.monotonic() - t0
+                logger.error(f"LLM 调用异常 ({elapsed:.1f}s): {type(e).__name__}: {e}")
+                return f"抱歉，AI 服务出错: {type(e).__name__}"
+            
+            elapsed = time.monotonic() - t0
+            logger.info(f"LLM 调用完成 ({elapsed:.1f}s)")
+            
+            # 检查响应是否有效
+            if response is None or not response.choices:
+                logger.error(f"LLM 返回无效响应: response={response}")
+                return "抱歉，AI 服务暂时无法响应，请稍后重试。"
             
             # 获取 assistant 消息
             assistant_message = response.choices[0].message
-            messages.append({
-                "role": "assistant",
-                "content": assistant_message.content,
-                "tool_calls": assistant_message.tool_calls
-            })
+            
+            # 直接 append 消息对象（官方推荐方式）
+            # DeepSeek Reasoner 要求 tool call 循环中回传 reasoning_content，
+            # 直接用消息对象可确保所有字段（content、reasoning_content、tool_calls）正确序列化
+            # 见 https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+            messages.append(assistant_message)
             
             # 如果没有 tool_calls，返回最终回复
             if not assistant_message.tool_calls:
@@ -152,6 +205,9 @@ class BaseAgent:
         格式:
         {system_prompt}
         
+        ## 可用 Skills（按需加载）
+        ...
+        
         ## 当前消息上下文
         - 来源渠道: {channel}
         - 发送者: {user_id}
@@ -167,6 +223,19 @@ class BaseAgent:
         - 如果无需回复，输出 <NO_REPLY>
         """
         result = self.system_prompt
+        
+        # 添加 skill 清单
+        if self.skill_summaries:
+            result += "\n\n## 可用 Skills（按需加载）"
+            result += "\n\n以下是你可以使用的 Skills。当任务需要某个 Skill 的专业指导时，使用 read_file 工具读取对应的 SKILL.md 文件获取详细说明。"
+            result += "\n\n| Skill | 说明 | 文件路径 |"
+            result += "\n|-------|------|----------|"
+            for skill in self.skill_summaries:
+                name = skill.get("name", "")
+                description = skill.get("description", "")
+                path = skill.get("path", "")
+                result += f"\n| {name} | {description} | {path} |"
+            result += "\n\n使用示例：read_file(\"skills/coding_assistant/SKILL.md\")"
         
         # 添加世界信息（消息上下文）
         if msg_context:
@@ -209,6 +278,7 @@ class BaseAgent:
         # 添加 NO_REPLY 机制说明
         result += "\n\n## 回复指南"
         result += "\n- 当你认为这条消息无需回复时（例如用户只是闲聊的一部分、感谢语、或消息不是针对你的），直接输出 `<NO_REPLY>` 作为完整回复"
+        result += "\n- 如果你已经通过工具发送了消息（如 discord_send_message、telegram_send_message），则不需要再生成文本回复，直接输出 `<NO_REPLY>`"
         result += "\n- 如果需要正常回复，直接输出回复内容即可（不要包含 <NO_REPLY>）"
         
         return result
@@ -435,7 +505,9 @@ class BaseAgent:
                 continue
             
             # 执行 tool
+            logger.info(f"执行 tool: {tool_name}, 参数: {tool_args_dict}")
             result = await registry.execute(tool_name, tool_args_dict, tool_context)
+            logger.info(f"tool {tool_name} 执行完成: {str(result)[:200]}")
             
             # 格式化结果
             if result.success:

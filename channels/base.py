@@ -1,12 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import Callable, Awaitable, Optional
+from typing import Optional
 import asyncio
 import logging
 
 from core.types import IncomingMessage, OutgoingMessage
-
-# 定义消息处理器类型：接收 IncomingMessage，返回 OutgoingMessage 的异步函数
-MessageHandler = Callable[[IncomingMessage], Awaitable[OutgoingMessage]]
 
 logger = logging.getLogger(__name__)
 
@@ -99,51 +96,58 @@ class ReconnectMixin:
 
 class BaseChannel(ABC):
     """
-    Channel 基类 - 所有渠道实现需要继承此类
+    Channel 基类 - 消息总线版本
     
     Channel 负责:
-    1. 接收用户消息，转换为 IncomingMessage
-    2. 调用 on_message 回调处理消息
+    1. 接收外部消息，转换为 IncomingMessage
+    2. 通过 MessageBus 发布消息（不再直接调用 on_message）
     3. 将 OutgoingMessage 发送给用户
     4. 支持主动推送消息（如定时提醒）
     """
     
-    def __init__(self, on_message: MessageHandler):
+    def __init__(self):
+        """初始化 Channel（不再需要 on_message 回调）"""
+        self._bus = None  # 由 ChannelManager 注入
+    
+    def set_bus(self, bus):
         """
-        初始化 Channel
+        注入 MessageBus（由 ChannelManager 调用）
         
         参数:
-        - on_message: 消息处理回调（由 Engine 传入）
-                     当收到用户消息时调用此回调
+        - bus: MessageBus 实例
         """
-        self.on_message = on_message
+        from gateway.bus import MessageBus
+        self._bus = bus
+    
+    async def publish_message(self, msg: IncomingMessage) -> Optional[OutgoingMessage]:
+        """
+        发布消息到 MessageBus
+        
+        Channel 收到消息后调用此方法。
+        对于需要同步回复的 Channel（如 Telegram 直接回复），
+        可以 await 获取回复。
+        
+        参数:
+        - msg: 入站消息
+        
+        返回: OutgoingMessage（如果等待回复）或 None
+        """
+        if not self._bus:
+            logger.error("MessageBus not set, cannot publish message")
+            return None
+        return await self._bus.publish(msg, wait_reply=True)
     
     @abstractmethod
     async def start(self):
-        """
-        启动 Channel
-        
-        对于 Telegram: 启动 polling
-        对于 CLI: 启动输入循环
-        """
+        """启动 Channel"""
         pass
     
     @abstractmethod
     async def send(self, user_id: str, message: OutgoingMessage):
-        """
-        主动发送消息（用于定时提醒等主动推送场景）
-        
-        参数:
-        - user_id: 目标用户 ID
-        - message: 要发送的消息
-        """
+        """主动发送消息"""
         pass
     
     @abstractmethod
     async def stop(self):
-        """
-        停止 Channel
-        
-        清理资源，关闭连接
-        """
+        """停止 Channel"""
         pass

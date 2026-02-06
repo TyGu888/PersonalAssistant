@@ -4,7 +4,7 @@ from typing import Optional, Union
 
 import discord
 
-from channels.base import BaseChannel, MessageHandler, ReconnectMixin
+from channels.base import BaseChannel, ReconnectMixin
 from core.types import IncomingMessage, OutgoingMessage
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,6 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
         self,
         token: str,
         allowed_users: list[str],
-        on_message: MessageHandler,
         max_retries: Optional[int] = None
     ):
         """
@@ -30,10 +29,9 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
         参数:
         - token: Discord Bot Token
         - allowed_users: 允许的用户 ID 列表（白名单）
-        - on_message: 消息处理回调
         - max_retries: 最大重试次数，None 表示无限重试
         """
-        super().__init__(on_message)
+        super().__init__()
         self.__init_reconnect__(max_retries)
         self.token = token
         self.allowed_users = set(allowed_users)  # 转为 set 提高查询效率
@@ -216,7 +214,7 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
             else:
                 logger.debug(f"Recording group message from user {user_id} (no reply expected)")
             
-            outgoing_message = await self.on_message(incoming_message)
+            outgoing_message = await self.publish_message(incoming_message)
             
             # 发送回复（只有 reply_expected 且有内容时才发送）
             if reply_expected and outgoing_message and (outgoing_message.text or outgoing_message.attachments):

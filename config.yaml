@@ -1,19 +1,49 @@
-# LLM 配置（火山引擎方舟）
-llm:
-  api_key: ${ARK_API_KEY}  # 从环境变量读取
-  base_url: https://ark.cn-beijing.volces.com/api/v3
-  model: ep-20260128095801-jc4gx  # 火山引擎模型端点
-  max_context_tokens: 16000  # Agent 上下文最大 token 数（留出响应空间）
-  max_response_tokens: 8192  # 可选：限制响应长度
+# LLM 配置 - 支持多 Provider Profile
+llm_profiles:
+  # 火山引擎方舟 (Doubao)
+  ark_doubao:
+    api_key: ${ARK_API_KEY}
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    model: ep-20260128095801-jc4gx
+    extra_params:
+      reasoning_effort: medium  # minimal|low|medium|high
+  
+  # DeepSeek Chat (普通对话)
+  deepseek_chat:
+    api_key: ${DEEPSEEK_API_KEY}
+    base_url: https://api.deepseek.com
+    model: deepseek-chat
+  
+  # DeepSeek Reasoner (R1 推理)
+  deepseek_reasoner:
+    api_key: ${DEEPSEEK_API_KEY}
+    base_url: https://api.deepseek.com
+    model: deepseek-reasoner
+    features:
+      preserve_reasoning_content: true  # 多轮对话保留 reasoning_content
+  
+  # OpenAI
+  openai_gpt4o:
+    api_key: ${OPENAI_API_KEY}
+    base_url: https://api.openai.com/v1
+    model: gpt-4o
 
-# Engine 配置
-engine:
-  # 进程模式:
-  # - "embedded": 内嵌模式，Agent 在主进程中运行（默认，适合开发调试）
-  # - "separated": 分离模式，Agent 在独立 Worker 进程中运行（适合生产环境）
-  process_mode: "embedded"
-  # Worker 进程数量（仅分离模式时有效）
-  num_workers: 2
+# 当前使用的 LLM Profile
+llm:
+  active: deepseek_reasoner  # 切换这里即可换模型
+  max_context_tokens: 16000
+  max_response_tokens: 8192
+
+# Gateway 配置 (新架构)
+gateway:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+  # api_key: ${HTTP_API_KEY}  # 取消注释启用 API Key 认证
+
+# Agent 配置 (新架构)
+agent:
+  wake_interval: 0         # 周期性唤醒间隔（秒），0 = 仅事件驱动
 
 # 数据目录（SQLite + ChromaDB）
 data:
@@ -30,11 +60,13 @@ skills:
       enabled: true
     coding_assistant:
       enabled: true
+    project_manager:
+      enabled: true
 
 # Memory 配置
 memory:
   identity_mode: "single_owner"  # "single_owner" | "multi_user"
-  max_context_messages: 50  # 上下文最大消息数（向后兼容，按条数截断）
+  max_context_messages: 10  # 上下文最大消息数（向后兼容，按条数截断）
   max_context_tokens: 16000  # 新增：按 token 截断（优先于条数截断）
 
 # Channel 配置
@@ -50,7 +82,7 @@ channels:
     token: ${DISCORD_BOT_TOKEN}
     allowed_users: ["968804902337912883"]  # 白名单
   http:
-    enabled: false  # HTTP API 默认关闭
+    enabled: false  # HTTP 已迁移到 gateway
     host: "0.0.0.0"
     port: 8080
     api_key: ${HTTP_API_KEY}  # 可选：API Key 认证，为空则不验证
@@ -62,32 +94,29 @@ channel_tools:
   discord: [discord_send_message, discord_reply_message, discord_add_reaction, discord_create_thread]
   telegram: [telegram_send_message]
 
-# 路由规则（按顺序匹配，第一个匹配生效）
+# 路由规则
+# 现在只有一个 default agent，所有消息都给全部工具
+# Agent 可以通过 read_file 读取 skills/ 目录下的 SKILL.md 获取专业指导
 routing:
-  - match: {pattern: "学习|复习|督促"}
-    agent: study_coach
-    tools: [scheduler_add, scheduler_list]
-  
-  - match: {pattern: "搜索|查找|研究|调查|了解|访问|网页|抓取"}
+  - match: {}  # 所有消息
     agent: default
-    tools: [web_search, fetch_url, create_file, send_file]
-  
-  - match: {pattern: "执行|运行|命令|shell|git|npm|pip|沙箱|sandbox|容器|docker"}
-    agent: default
-    tools: [run_command, sandbox_start, sandbox_exec, sandbox_stop, sandbox_copy_to, sandbox_copy_from, sandbox_status]
-  
-  - match: {pattern: "创建|写入|读取|文件|目录|删除|追加|发送"}
-    agent: default
-    tools: [create_file, read_file, list_files, append_file, delete_file, send_file]
-  
-  - match: {pattern: "提醒|定时|闹钟|计划"}
-    agent: default
-    tools: [scheduler_add, scheduler_list, scheduler_cancel]
-  
-  - match: {}  # 兜底
-    agent: default
-    # 可添加 mcp:* 启用所有 MCP 工具，或 mcp:server_name:* 启用特定 server 的工具
-    tools: [web_search, run_command, create_file, read_file, list_files, send_file, scheduler_add, scheduler_list, scheduler_cancel, sandbox_start, sandbox_exec, sandbox_stop, sandbox_status]
+    tools: [
+      # 文件操作
+      create_file, read_file, list_files, append_file, delete_file, send_file, 
+      edit_file, find_files, grep_files, write_file,
+      # 网络
+      web_search, fetch_url,
+      # 定时提醒
+      scheduler_add, scheduler_list, scheduler_cancel,
+      # Shell / 沙箱
+      run_command, sandbox_start, sandbox_exec, sandbox_stop, sandbox_copy_to, sandbox_copy_from, sandbox_status,
+      # 记忆
+      memory_search, memory_add,
+      # Sub-Agent
+      agent_spawn, agent_list, agent_send, agent_history,
+      # Channel (主动发消息)
+      send_message
+    ]
 
 # Docker 沙箱配置
 sandbox:

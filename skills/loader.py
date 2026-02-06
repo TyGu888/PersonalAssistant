@@ -200,3 +200,25 @@ def reload_skill(skills_dir: str, skill_name: str) -> Optional[Skill]:
         return None
     
     return parse_skill_file(str(skill_file))
+
+
+def get_skill_summaries(skills: dict[str, Skill]) -> list[dict]:
+    """
+    获取所有 skill 的清单（name + description + path），供 system prompt 使用
+    
+    参数:
+    - skills: 已加载的 skills 字典（由 load_skills() 返回）
+    
+    返回:
+    - [{"name": "xxx", "description": "xxx", "path": "skills/xxx/SKILL.md"}, ...] 列表
+    - 排除 name 为 "default" 的 skill
+    """
+    return [
+        {
+            "name": skill.name, 
+            "description": skill.description,
+            "path": f"skills/{skill.name}/SKILL.md"
+        }
+        for skill in skills.values()
+        if skill.name != "default"
+    ]
