@@ -11,7 +11,7 @@
 **Personal Agent Hub** 是一个 Agent-Centric 的个人 AI 助手框架：
 - Agent 是系统核心主体，自主管理记忆和决策
 - Gateway 中心枢纽（FastAPI + WebSocket + MessageBus）
-- 多渠道接入（Telegram / Discord / WebSocket CLI Client）
+- 多渠道接入（Discord / Telegram / Slack / 飞书 / QQ / WebSocket CLI Client）
 - 插件式 Skills 系统（Agent 按需加载 SKILL.md）
 - 可插拔 Tools（定时提醒、文件操作、Shell、网页搜索、MCP、跨渠道消息...）
 - 长期记忆（Session 历史 + RAG 向量搜索 + 跨渠道身份统一）
@@ -44,13 +44,19 @@ personal_agent_hub/
 ├── channels/                  # Channel Services（独立通讯服务）
 │   ├── base.py                # Channel 基类（MessageBus 集成 + ReconnectMixin）
 │   ├── telegram.py            # Telegram Bot（自动重连）
-│   └── discord.py             # Discord Bot（自动重连）
+│   ├── discord.py             # Discord Bot（自动重连）
+│   ├── slack.py               # Slack Bot（Socket Mode）
+│   ├── feishu.py              # 飞书 Bot（WebSocket）
+│   └── qq.py                  # QQ Bot（频道/群/C2C）
 ├── cli_client/                # 远程 CLI 客户端
 │   └── client.py              # WebSocket CLI（类 Claude Code 风格）
 ├── tools/                     # 可插拔工具
 │   ├── registry.py            # Tool 注册系统（支持 MCP）
 │   ├── channel.py             # 跨渠道消息发送（send_message）
 │   ├── discord_actions.py     # Discord 特定操作（回复/反应/建线程）
+│   ├── slack_actions.py       # Slack 特定操作（Thread 回复/反应/置顶）
+│   ├── feishu_actions.py      # 飞书特定操作（回复/反应/置顶/建群）
+│   ├── qq_actions.py          # QQ 特定操作（反应/置顶）
 │   ├── scheduler.py           # 智能定时提醒（auto_continue）
 │   ├── filesystem.py          # 文件操作（edit/find/grep，支持 skills/ 和 data/）
 │   ├── shell.py               # Shell 命令（持久化会话）
@@ -139,8 +145,14 @@ AgentLoop
 | **agent/base.py** | BaseAgent：LLM 调用 + Tool 执行 + Token 管理 + 多模态 |
 | **agent/default.py** | DefaultAgent：通用助手，Skill 清单注入 |
 | **channels/base.py** | Channel 基类：publish_message() (fire-and-forget) + deliver(target, msg) + ReconnectMixin |
+| **channels/slack.py** | Slack Bot (Socket Mode + AsyncApp) |
+| **channels/feishu.py** | 飞书 Bot (WebSocket + lark.ws.Client) |
+| **channels/qq.py** | QQ Bot (频道/群/C2C, botpy.Client) |
 | **tools/channel.py** | send_message 工具：Agent 主动向任意 Channel 发消息 |
 | **tools/registry.py** | Tool 注册装饰器，支持本地函数和 MCP 工具 |
+| **tools/slack_actions.py** | Slack Thread 回复、反应、置顶 |
+| **tools/feishu_actions.py** | 飞书消息回复、反应、置顶、建群 |
+| **tools/qq_actions.py** | QQ 表情反应、消息置顶 |
 | **cli_client/client.py** | WebSocket CLI 客户端，类 Claude Code 风格 |
 | **worker/agent_worker.py** | Worker 进程，使用 AgentRuntime 替代直接 MemoryManager |
 | **core/types.py** | 共享类型：IncomingMessage, OutgoingMessage, MessageEnvelope |
@@ -273,7 +285,7 @@ agent:
 |------|------|------|
 | **Gateway** | app, bus, dispatcher, channel_manager, server | ✅ |
 | **Agent** | loop, runtime, base, default | ✅ |
-| **Channels** | Telegram, Discord | ✅ |
+| **Channels** | Telegram, Discord, Slack, Feishu, QQ | ✅ |
 | **Tools** | registry, channel, scheduler, filesystem, shell, web, image, sandbox, mcp_client, memory, subagent | ✅ |
 | **Memory** | session, global_mem (scope + person_id), manager (Token 截断 + Identity Mapping) | ✅ |
 | **Skills** | loader (插件式), study_coach, coding_assistant, project_manager | ✅ |
@@ -315,6 +327,8 @@ agent:
 - [x] Unified deliver pattern（Dispatcher → channel.deliver）
 - [x] WebSocket RPC（CLI Client 提供工具给 Agent）
 - [x] System wake messages（周期性唤醒 + 定时任务唤醒）
+- [x] Contact Registry（启动扫描 + 懒积累）
+- [x] 通讯录注入 system prompt（唤醒消息时显示）
 
 ### 待测试
 
@@ -324,6 +338,11 @@ agent:
 - [ ] 周期性唤醒 (wake_interval > 0)
 - [ ] Scheduler 唤醒 Agent 后使用 send_message 投递
 - [ ] Worker 分离模式在新架构下运行
+- [ ] Slack Channel 完整对话测试
+- [ ] 飞书 Channel 完整对话测试
+- [ ] QQ Channel 完整对话测试（频道/群/C2C）
+- [ ] Contact Registry 启动扫描验证
+- [ ] 周期性唤醒通讯录可见性验证
 
 ---
 
@@ -331,6 +350,7 @@ agent:
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-02-07 | **新增 Slack/飞书/QQ Channel + Contact Registry**。三个新渠道完整接入（收发消息、deliver 模式、平台特有操作工具）；Contact Registry 通讯录系统（启动扫描 + 懒积累 + 唤醒时注入 system prompt）|
 | 2026-02-07 | **统一出站路径重构**。Channel.send() → deliver(target, msg)；Dispatcher 统一路由回复和主动消息；删除 CLI Channel（cli_client 替代）；Scheduler 回调改为 MessageBus 唤醒；Agent 周期性唤醒发布系统消息；WebSocket RPC 支持远程工具调用 |
 | 2026-02-06 | **架构重构：Agent-Centric**。MessageBus 解耦 Channel 和 Agent；Agent 自主管理 Memory；Gateway 替代 Engine；FastAPI + WebSocket 服务；CLI Client；send_message Tool |
 | 2026-02-05 | Skill 系统重构：从 Agent 替换模式改为插件式按需加载 |
@@ -369,6 +389,9 @@ typer>=0.9.0
 python-dotenv>=1.0.0
 python-telegram-bot>=20.0
 discord.py>=2.3.0
+slack-bolt[async]>=1.18.0
+lark-oapi>=1.5.0
+qq-botpy>=1.1.5
 openai>=1.0.0
 chromadb>=0.4.0
 apscheduler>=3.10.0

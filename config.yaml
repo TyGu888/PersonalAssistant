@@ -80,6 +80,23 @@ channels:
     enabled: true
     token: ${DISCORD_BOT_TOKEN}
     allowed_users: ["968804902337912883"]  # 白名单
+  slack:
+    enabled: false
+    bot_token: ${SLACK_BOT_TOKEN}   # xoxb-...
+    app_token: ${SLACK_APP_TOKEN}   # xapp-...
+    allowed_users: []
+  feishu:
+    enabled: false
+    app_id: ${FEISHU_APP_ID}
+    app_secret: ${FEISHU_APP_SECRET}
+    encrypt_key: ""
+    verification_token: ""
+    allowed_users: []
+  qq:
+    enabled: false
+    appid: ${QQ_BOT_APPID}
+    secret: ${QQ_BOT_SECRET}
+    allowed_users: []
   http:
     enabled: false  # HTTP 已迁移到 gateway
     host: "0.0.0.0"
@@ -92,6 +109,9 @@ channels:
 channel_tools:
   discord: [discord_reply_message, discord_add_reaction, discord_create_thread]
   telegram: []
+  slack: [slack_reply_in_thread, slack_add_reaction, slack_pin_message]
+  feishu: [feishu_reply_message, feishu_add_reaction, feishu_pin_message, feishu_create_chat]
+  qq: [qq_add_reaction, qq_pin_message]
 
 # 路由规则
 # 现在只有一个 default agent，所有消息都给全部工具

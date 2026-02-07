@@ -108,6 +108,7 @@ class BaseChannel(ABC):
     def __init__(self):
         """初始化 Channel（不再需要 on_message 回调）"""
         self._bus = None  # 由 ChannelManager 注入
+        self._contact_callback = None  # 由 ChannelManager 注入
     
     def set_bus(self, bus):
         """
@@ -118,6 +119,15 @@ class BaseChannel(ABC):
         """
         from gateway.bus import MessageBus
         self._bus = bus
+    
+    def set_contact_callback(self, callback):
+        """
+        注入联系人回调（由 ChannelManager 调用）
+        
+        参数:
+        - callback: 接收 contact info dict 的回调函数
+        """
+        self._contact_callback = callback
     
     async def publish_message(self, msg: IncomingMessage) -> None:
         """
@@ -133,6 +143,25 @@ class BaseChannel(ABC):
             logger.error("MessageBus not set, cannot publish message")
             return None
         await self._bus.publish(msg, wait_reply=False)
+        
+        # Lazy accumulate contacts
+        if self._contact_callback:
+            try:
+                info = self.extract_contact_info(msg)
+                if info:
+                    self._contact_callback(info)
+            except Exception as e:
+                logger.debug(f"Failed to extract contact info: {e}")
+    
+    @abstractmethod
+    def extract_contact_info(self, msg: IncomingMessage) -> dict:
+        """
+        从入站消息中提取联系人信息
+        
+        每个 Channel 子类实现此方法，返回该 Channel 特有的联系人结构。
+        返回空 dict 表示无需更新。
+        """
+        pass
     
     @abstractmethod
     async def start(self):

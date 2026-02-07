@@ -257,6 +257,7 @@ class AgentLoop:
                 "session_id": session_id,
                 "raw": msg.raw,
                 "available_channels": self.dispatcher.list_channels(),
+                "contacts": self._channel_manager.get_contacts_summary() if self._channel_manager else {},
             }
             
             # 8. 加载上下文（历史 + 记忆）

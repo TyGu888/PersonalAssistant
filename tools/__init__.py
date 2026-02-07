@@ -10,3 +10,6 @@ from tools import subagent
 from tools import memory
 from tools import channel
 from tools import sandbox
+import tools.slack_actions
+import tools.feishu_actions
+import tools.qq_actions

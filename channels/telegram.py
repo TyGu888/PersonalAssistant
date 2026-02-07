@@ -106,6 +106,9 @@ class TelegramChannel(BaseChannel, ReconnectMixin):
         await self.application.initialize()
         await self.application.start()
         await self.application.updater.start_polling()
+        
+        if self._contact_callback:
+            self._contact_callback({"status": "connected"})
     
     async def _cleanup(self):
         """清理连接资源"""
@@ -131,6 +134,16 @@ class TelegramChannel(BaseChannel, ReconnectMixin):
                 self.application = None
         except Exception as e:
             logger.error(f"Error during cleanup: {e}", exc_info=True)
+    
+    def extract_contact_info(self, msg: IncomingMessage) -> dict:
+        raw = msg.raw or {}
+        info = {}
+        chat_id = raw.get("chat_id")
+        chat_type = raw.get("chat_type", "private")
+        if chat_id:
+            chat_name = raw.get("chat_name") or (f"Chat {chat_id}")
+            info["chats"] = {str(chat_id): {"name": chat_name, "type": chat_type}}
+        return info
     
     async def _handle_telegram_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -173,6 +186,7 @@ class TelegramChannel(BaseChannel, ReconnectMixin):
                     "message_id": update.message.message_id,
                     "chat_id": update.effective_chat.id,
                     "chat_type": chat_type,
+                    "chat_name": update.effective_chat.title or update.effective_chat.full_name or str(update.effective_chat.id),
                 }
             )
             

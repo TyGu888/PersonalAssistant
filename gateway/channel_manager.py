@@ -44,6 +44,7 @@ class ChannelManager:
         self.config = config
         
         self.channels: dict = {}  # name -> BaseChannel
+        self.contacts: dict = {}  # name -> contact info (lazy accumulated)
         self._channel_tasks: dict[str, asyncio.Task] = {}
         self._channel_restart_delays: dict[str, float] = {}
         self._shutdown_event = asyncio.Event()
@@ -72,6 +73,41 @@ class ChannelManager:
             )
             self._register_channel("discord", channel)
         
+        # Slack
+        if channels_config.get("slack", {}).get("enabled", False):
+            from channels.slack import SlackChannel
+            slack_config = channels_config["slack"]
+            channel = SlackChannel(
+                bot_token=slack_config.get("bot_token", ""),
+                app_token=slack_config.get("app_token", ""),
+                allowed_users=slack_config.get("allowed_users", []),
+            )
+            self._register_channel("slack", channel)
+
+        # Feishu (飞书)
+        if channels_config.get("feishu", {}).get("enabled", False):
+            from channels.feishu import FeishuChannel
+            feishu_config = channels_config["feishu"]
+            channel = FeishuChannel(
+                app_id=feishu_config.get("app_id", ""),
+                app_secret=feishu_config.get("app_secret", ""),
+                encrypt_key=feishu_config.get("encrypt_key", ""),
+                verification_token=feishu_config.get("verification_token", ""),
+                allowed_users=feishu_config.get("allowed_users", []),
+            )
+            self._register_channel("feishu", channel)
+
+        # QQ
+        if channels_config.get("qq", {}).get("enabled", False):
+            from channels.qq import QQChannel
+            qq_config = channels_config["qq"]
+            channel = QQChannel(
+                appid=qq_config.get("appid", ""),
+                secret=qq_config.get("secret", ""),
+                allowed_users=qq_config.get("allowed_users", []),
+            )
+            self._register_channel("qq", channel)
+        
         logger.info(f"ChannelManager initialized with channels: {list(self.channels.keys())}")
     
     def _register_channel(self, name: str, channel):
@@ -79,11 +115,36 @@ class ChannelManager:
         # 注入 MessageBus
         channel.set_bus(self.bus)
         
+        # Inject contact callback for lazy accumulation
+        channel.set_contact_callback(lambda info, cn=name: self.update_contacts(cn, info))
+        
         # 注册到 Dispatcher（用于出站消息）
         self.dispatcher.register_channel(name, channel.deliver)
         
         # 保存引用
         self.channels[name] = channel
+    
+    def update_contacts(self, channel_name: str, info: dict):
+        """Update contact registry for a channel (merge strategy)"""
+        if channel_name not in self.contacts:
+            self.contacts[channel_name] = {}
+        existing = self.contacts[channel_name]
+        # Deep merge: for each top-level key, if both are dicts, merge; else overwrite
+        for key, value in info.items():
+            if key in existing and isinstance(existing[key], dict) and isinstance(value, dict):
+                existing[key].update(value)
+            else:
+                existing[key] = value
+        logger.debug(f"Updated contacts for {channel_name}: {list(info.keys())}")
+    
+    def get_contacts_summary(self) -> dict:
+        """Get the current contacts registry"""
+        return dict(self.contacts)
+    
+    def report_contacts(self, channel_name: str, info: dict):
+        """Called by channels after startup scan to report initial contacts"""
+        self.update_contacts(channel_name, info)
+        logger.info(f"Channel '{channel_name}' reported contacts: {list(info.keys())}")
     
     async def start_all(self):
         """启动所有 Channel（带监控）"""

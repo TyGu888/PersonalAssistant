@@ -283,6 +283,40 @@ class BaseAgent:
             result += f"\n你可以通过 send_message 工具向以下渠道发送消息: {', '.join(available_channels)}"
             result += "\n- 如果不指定 channel 和 user_id，默认回复当前对话"
             result += "\n- 指定 channel 和 user_id 可以向其他渠道/用户主动发消息"
+
+        # 通讯录信息（仅在系统唤醒消息时显示，节省 Token）
+        is_system_wake = msg_context.get("channel") == "system" if msg_context else False
+        contacts = msg_context.get("contacts", {}) if msg_context else {}
+        if is_system_wake and contacts:
+            result += "\n\n## 通讯录（可联系的渠道和目标）"
+            for ch_name, ch_info in contacts.items():
+                status = ch_info.get("status", "unknown")
+                result += f"\n\n### {ch_name} ({status})"
+                # Guilds (Discord, QQ)
+                for guild_id, guild in ch_info.get("guilds", {}).items():
+                    guild_name = guild.get("name", guild_id)
+                    result += f"\n- Guild: {guild_name} (id: {guild_id})"
+                    for ch_id, ch_data in guild.get("channels", {}).items():
+                        ch_n = ch_data.get("name", ch_id)
+                        result += f"\n  - #{ch_n} (channel_id: {ch_id})"
+                # Chats (Telegram, Feishu)
+                for chat_id, chat in ch_info.get("chats", {}).items():
+                    chat_name = chat.get("name", chat_id)
+                    chat_type = chat.get("type", "")
+                    result += f"\n- Chat: {chat_name} ({chat_type}, chat_id: {chat_id})"
+                # Channels (Slack)
+                for ch_id, ch_data in ch_info.get("channels", {}).items():
+                    ch_n = ch_data.get("name", ch_id)
+                    ch_type = ch_data.get("type", "")
+                    result += f"\n- #{ch_n} ({ch_type}, channel_id: {ch_id})"
+                # Groups (QQ)
+                for g_id, g_data in ch_info.get("groups", {}).items():
+                    g_name = g_data.get("name", g_id)
+                    result += f"\n- Group: {g_name} (group_openid: {g_id})"
+                # DM Users
+                for uid, u_data in ch_info.get("dm_users", {}).items():
+                    u_name = u_data.get("name", uid)
+                    result += f"\n- DM: {u_name} (user_id: {uid})"
         
         # 添加 NO_REPLY 机制说明
         result += "\n\n## 回复指南"

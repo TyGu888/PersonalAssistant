@@ -8,7 +8,7 @@ Python version of OpenClawd
 
 - **Agent-Centric 架构**: Agent 通过 MessageBus 事件驱动，自主管理记忆和会话
 - **Gateway 中心枢纽**: FastAPI + WebSocket，连接 Channel Services 和远程 Client
-- **多渠道接入**: Telegram / Discord / WebSocket CLI Client
+- **多渠道接入**: Discord / Telegram / Slack / 飞书 / QQ / WebSocket CLI Client
 - **插件式 Skills**: Agent 按需加载 SKILL.md 获取专业指导
 - **可插拔 Tools**: 定时提醒、文件操作、Shell 执行、网页搜索、MCP 协议、跨渠道消息发送
 - **长期记忆**: Session 历史 (SQLite) + RAG 向量搜索 (ChromaDB) + 跨渠道身份统一
@@ -38,6 +38,12 @@ export ARK_API_KEY="your-ark-api-key"
 # 可选（按需设置）
 export TELEGRAM_BOT_TOKEN="your-telegram-bot-token"
 export DISCORD_BOT_TOKEN="your-discord-bot-token"
+export SLACK_BOT_TOKEN="xoxb-..."
+export SLACK_APP_TOKEN="xapp-..."
+export FEISHU_APP_ID="..."
+export FEISHU_APP_SECRET="..."
+export QQ_BOT_APPID="..."
+export QQ_BOT_SECRET="..."
 export HTTP_API_KEY="your-http-api-key"
 ```
 
@@ -125,13 +131,19 @@ personal_agent_hub/
 ├── channels/                  # Channel Services
 │   ├── base.py                # Channel 基类（MessageBus 集成）
 │   ├── telegram.py            # Telegram Bot（自动重连）
-│   └── discord.py             # Discord Bot（自动重连）
+│   ├── discord.py             # Discord Bot（自动重连）
+│   ├── slack.py               # Slack Bot（Socket Mode）
+│   ├── feishu.py              # 飞书 Bot（WebSocket）
+│   └── qq.py                  # QQ Bot（频道/群/C2C）
 ├── cli_client/                # 远程 CLI 客户端
 │   └── client.py              # WebSocket CLI（类 Claude Code）
 ├── tools/                     # 可插拔工具
 │   ├── registry.py            # Tool 注册（支持 MCP）
 │   ├── channel.py             # 跨渠道消息发送（send_message）
 │   ├── discord_actions.py     # Discord 特定操作（回复/反应/建线程）
+│   ├── slack_actions.py       # Slack 特定操作（Thread 回复/反应/置顶）
+│   ├── feishu_actions.py      # 飞书特定操作（回复/反应/置顶/建群）
+│   ├── qq_actions.py          # QQ 特定操作（反应/置顶）
 │   ├── scheduler.py           # 定时提醒
 │   ├── filesystem.py          # 文件操作
 │   ├── shell.py               # Shell 执行
@@ -298,7 +310,7 @@ async def my_tool(arg1: str, context=None) -> str:
 
 ### 添加新 Channel
 
-继承 `BaseChannel`，实现 `start()`, `deliver()`, `stop()` 方法。`deliver(target: dict, message)` 接收路由目标字典，Dispatcher 自动提取原始消息的 raw 字段和 user_id 构造 target。通过 `self.publish_message(msg)` 发布消息到 MessageBus。Channel 基类已内置自动重连机制。
+继承 `BaseChannel`，实现 `start()`, `deliver()`, `stop()` 方法。`deliver(target: dict, message)` 接收路由目标字典，Dispatcher 自动提取原始消息的 raw 字段和 user_id 构造 target。通过 `self.publish_message(msg)` 发布消息到 MessageBus。Channel 基类已内置自动重连机制。如需支持 Contact Registry，实现 `extract_contact_info()` 方法返回联系人信息。
 
 ## Docker 沙箱
 

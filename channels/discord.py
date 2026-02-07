@@ -100,11 +100,44 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
         self.is_running = False
         logger.info("Discord Bot exited")
     
+    def extract_contact_info(self, msg: IncomingMessage) -> dict:
+        raw = msg.raw or {}
+        info = {}
+        # Track guild and channel
+        guild_id = raw.get("guild_id")
+        if guild_id:
+            guild_name = raw.get("guild_name", str(guild_id))
+            channel_id = str(raw.get("channel_id", ""))
+            channel_name = raw.get("channel_name", channel_id)
+            channel_type = "thread" if raw.get("is_thread") else "text"
+            if "guilds" not in info:
+                info["guilds"] = {}
+            info["guilds"][str(guild_id)] = {
+                "name": guild_name,
+                "channels": {channel_id: {"name": channel_name, "type": channel_type}}
+            }
+        # Track DM users
+        if not msg.is_group and msg.user_id:
+            author_name = raw.get("author_display_name") or raw.get("author_name") or msg.user_id
+            info["dm_users"] = {str(msg.user_id): {"name": str(author_name)}}
+        return info
+    
     async def _on_ready(self):
         """Bot 就绪时的回调"""
         # 连接成功，重置重连状态
         self._reset_reconnect_state()
         logger.info(f"Discord Bot logged in as {self.client.user}")
+        
+        # Startup scan: report guilds and channels to contact registry
+        if self.client and self._contact_callback:
+            scan_info = {"guilds": {}, "status": "connected", "bot_user": str(self.client.user)}
+            for guild in self.client.guilds:
+                guild_data = {"name": guild.name, "channels": {}}
+                for ch in guild.text_channels:
+                    guild_data["channels"][str(ch.id)] = {"name": ch.name, "type": "text"}
+                scan_info["guilds"][str(guild.id)] = guild_data
+            self._contact_callback(scan_info)
+            logger.info(f"Discord startup scan: {len(self.client.guilds)} guild(s)")
     
     async def _cleanup(self):
         """清理连接资源"""
