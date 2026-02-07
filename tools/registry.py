@@ -38,9 +38,9 @@ class ToolRegistry:
             }
         )
         async def scheduler_add(time: str, content: str, context=None) -> str:
-            # context 由 Engine 在调用时自动注入
-            engine = context["engine"]
-            await engine.send_push(...)
+            # context 由 AgentLoop 在调用时自动注入
+            dispatcher = context["dispatcher"]
+            await dispatcher.send_to_channel(...)
         """
         def decorator(func: Callable):
             # 检查函数签名，判断是否有 context 参数
@@ -143,31 +143,25 @@ class ToolRegistry:
     
     async def execute(self, name: str, args_dict: dict, context: dict = None) -> ToolResult:
         """
-        执行 Tool（支持依赖注入，支持 MCP 工具）
+        执行 Tool（支持依赖注入，支持 MCP 工具，支持远程工具）
         
         输入:
-        - name: Tool 名称（本地工具或 mcp:{server}:{tool} 格式）
+        - name: Tool 名称（本地工具 / mcp:{server}:{tool} / 远程客户端工具）
         - args_dict: 参数字典（已解析的 JSON）
-        - context: 注入的上下文 {"engine": ..., "scheduler": ..., "memory": ...}
+        - context: 注入的上下文 {"dispatcher": ..., "scheduler": ..., "memory": ...}
         
         输出: ToolResult(success, output, error)
         
-        流程:
-        1. 检查是否是 MCP 工具
-        2. 检查 Tool 是否存在
-        3. 执行并返回结果
+        查找顺序: MCP → 本地 → 远程（通过 Dispatcher RPC）
         """
         # 检查是否是 MCP 工具
         if name.startswith("mcp:"):
             return await self._execute_mcp_tool(name, args_dict)
         
-        # 检查 Tool 是否存在
+        # 检查本地 Tool 是否存在
         if name not in self._tools:
-            return ToolResult(
-                success=False,
-                output="",
-                error=f"Tool '{name}' not found"
-            )
+            # 尝试远程工具 (通过 Dispatcher RPC)
+            return await self._execute_remote_tool(name, args_dict, context)
         
         tool = self._tools[name]
         func = tool["func"]
@@ -207,6 +201,29 @@ class ToolRegistry:
                 output="",
                 error=str(e)
             )
+    
+    async def _execute_remote_tool(self, name: str, args_dict: dict, context: dict = None) -> ToolResult:
+        """
+        通过 Dispatcher RPC 执行远程客户端工具
+        
+        远程工具由 WebSocket 客户端注册，通过 Dispatcher 的 RPC 机制调用。
+        """
+        dispatcher = context.get("dispatcher") if context else None
+        if not dispatcher:
+            return ToolResult(success=False, output="", error=f"Tool '{name}' not found")
+        
+        # 检查 dispatcher 是否有这个远程工具
+        if name not in dispatcher.get_remote_tool_names():
+            return ToolResult(success=False, output="", error=f"Tool '{name}' not found")
+        
+        try:
+            logger.info(f"Invoking remote tool: {name} with args: {args_dict}")
+            result = await dispatcher.invoke_remote_tool(name, args_dict)
+            logger.info(f"Remote tool {name} returned: {str(result)[:200]}")
+            return ToolResult(success=True, output=result, error=None)
+        except Exception as e:
+            logger.error(f"Remote tool {name} error: {e}")
+            return ToolResult(success=False, output="", error=str(e))
     
     async def _execute_mcp_tool(self, name: str, args_dict: dict) -> ToolResult:
         """

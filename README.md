@@ -47,9 +47,6 @@ export HTTP_API_KEY="your-http-api-key"
 # 启动 Gateway（包含 Agent + Channels + FastAPI）
 python main.py start
 
-# 单次对话测试
-python main.py chat "你好"
-
 # 启动 CLI Client（通过 WebSocket 连接 Gateway）
 python main.py client
 python main.py client --host localhost --port 8080 --api-key your-key
@@ -96,7 +93,10 @@ AgentLoop
     └── Dispatcher.dispatch_reply() → 路由回复
     │
     ▼
-Channel/Client 收到回复
+Dispatcher.deliver(target, message)
+    │
+    ▼
+channel.deliver(target, message) → Channel/Client 收到回复
 ```
 
 ### 核心设计理念
@@ -109,7 +109,7 @@ Channel/Client 收到回复
 
 ```
 personal_agent_hub/
-├── main.py                    # CLI 入口（start/chat/client）
+├── main.py                    # CLI 入口（start/client）
 ├── config.yaml                # 配置文件
 ├── gateway/                   # Gateway 中心枢纽
 │   ├── app.py                 # Gateway 主类（替代旧 Engine）
@@ -124,7 +124,6 @@ personal_agent_hub/
 │   └── default.py             # DefaultAgent（通用助手）
 ├── channels/                  # Channel Services
 │   ├── base.py                # Channel 基类（MessageBus 集成）
-│   ├── cli.py                 # CLI Channel（本地调试用）
 │   ├── telegram.py            # Telegram Bot（自动重连）
 │   └── discord.py             # Discord Bot（自动重连）
 ├── cli_client/                # 远程 CLI 客户端
@@ -132,6 +131,7 @@ personal_agent_hub/
 ├── tools/                     # 可插拔工具
 │   ├── registry.py            # Tool 注册（支持 MCP）
 │   ├── channel.py             # 跨渠道消息发送（send_message）
+│   ├── discord_actions.py     # Discord 特定操作（回复/反应/建线程）
 │   ├── scheduler.py           # 定时提醒
 │   ├── filesystem.py          # 文件操作
 │   ├── shell.py               # Shell 执行
@@ -250,6 +250,13 @@ curl -X POST http://localhost:8080/chat \
 
 // 3. 服务端推送
 ← {"type": "push", "text": "..."}
+
+// 4. 客户端注册工具
+→ {"type": "register_tools", "tools": [{"name": "...", "description": "...", "parameters": {...}}]}
+
+// 5. 服务端调用客户端工具 (RPC)
+← {"type": "tool_request", "call_id": "...", "tool_name": "...", "arguments": {...}}
+→ {"type": "tool_result", "call_id": "...", "result": "..."}
 ```
 
 ## 扩展开发
@@ -291,7 +298,7 @@ async def my_tool(arg1: str, context=None) -> str:
 
 ### 添加新 Channel
 
-继承 `BaseChannel`，实现 `start()`, `send()`, `stop()` 方法。通过 `self.publish_message(msg)` 发布消息到 MessageBus。Channel 基类已内置自动重连机制。
+继承 `BaseChannel`，实现 `start()`, `deliver()`, `stop()` 方法。`deliver(target: dict, message)` 接收路由目标字典，Dispatcher 自动提取原始消息的 raw 字段和 user_id 构造 target。通过 `self.publish_message(msg)` 发布消息到 MessageBus。Channel 基类已内置自动重连机制。
 
 ## Docker 沙箱
 

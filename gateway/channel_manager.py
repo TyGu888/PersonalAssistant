@@ -4,7 +4,7 @@ ChannelManager - Channel 生命周期管理
 职责：
 1. 根据配置创建和初始化 Channel 实例
 2. 注入 MessageBus 到每个 Channel
-3. 注册 Channel 的 send 函数到 Dispatcher
+3. 注册 Channel 的 deliver 函数到 Dispatcher
 4. 管理 Channel 的启动、监控和重启（指数退避）
 5. 优雅关闭所有 Channel
 """
@@ -72,14 +72,6 @@ class ChannelManager:
             )
             self._register_channel("discord", channel)
         
-        # CLI (仅在配置启用时，通常用于本地调试)
-        if channels_config.get("cli", {}).get("enabled", False):
-            from channels.cli import CLIChannel
-            channel = CLIChannel(
-                user_id="cli_user"
-            )
-            self._register_channel("cli", channel)
-        
         logger.info(f"ChannelManager initialized with channels: {list(self.channels.keys())}")
     
     def _register_channel(self, name: str, channel):
@@ -88,7 +80,7 @@ class ChannelManager:
         channel.set_bus(self.bus)
         
         # 注册到 Dispatcher（用于出站消息）
-        self.dispatcher.register_channel(name, channel.send)
+        self.dispatcher.register_channel(name, channel.deliver)
         
         # 保存引用
         self.channels[name] = channel

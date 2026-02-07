@@ -44,6 +44,7 @@ gateway:
 # Agent 配置 (新架构)
 agent:
   wake_interval: 0         # 周期性唤醒间隔（秒），0 = 仅事件驱动
+  max_iterations: 50       # 单次对话最大 tool call 循环次数
 
 # 数据目录（SQLite + ChromaDB）
 data:
@@ -71,8 +72,6 @@ memory:
 
 # Channel 配置
 channels:
-  cli:
-    enabled: false   
   telegram:
     enabled: false  # Phase 0 先关闭
     token: ${TELEGRAM_BOT_TOKEN}
@@ -91,8 +90,8 @@ channels:
 # 当消息来自某个 channel 时，自动将这些工具添加到可用工具列表
 # 注意：这些工具需要单独实现，这里只是建立机制
 channel_tools:
-  discord: [discord_send_message, discord_reply_message, discord_add_reaction, discord_create_thread]
-  telegram: [telegram_send_message]
+  discord: [discord_reply_message, discord_add_reaction, discord_create_thread]
+  telegram: []
 
 # 路由规则
 # 现在只有一个 default agent，所有消息都给全部工具
@@ -103,7 +102,7 @@ routing:
     tools: [
       # 文件操作
       create_file, read_file, list_files, append_file, delete_file, send_file, 
-      edit_file, find_files, grep_files, write_file,
+      edit_file, find_files, grep_files,
       # 网络
       web_search, fetch_url,
       # 定时提醒
@@ -120,7 +119,7 @@ routing:
 
 # Docker 沙箱配置
 sandbox:
-  enabled: false  # 默认关闭，启用后 shell 命令将在容器中执行
+  enabled: true  # 默认关闭，启用后 shell 命令将在容器中执行
   image: "personalassistant-sandbox:latest"  # 沙箱镜像
   memory_limit: "512m"  # 内存限制
   cpu_limit: 1.0  # CPU 限制（核数）

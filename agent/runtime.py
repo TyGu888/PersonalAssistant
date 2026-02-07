@@ -105,5 +105,6 @@ class AgentRuntime:
             "person_id": person_id,
             "session_id": session_id,
             "msg_context": msg_context,
-            "pending_attachments": []
+            "pending_attachments": [],
+            # dispatcher and scheduler are injected by AgentLoop after this call
         }

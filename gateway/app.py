@@ -24,7 +24,6 @@ from gateway.channel_manager import ChannelManager
 from gateway.server import GatewayServer
 from agent.loop import AgentLoop
 from agent.runtime import AgentRuntime
-from core.types import IncomingMessage, OutgoingMessage
 from tools.registry import registry
 from tools.mcp_client import MCPServer
 
@@ -36,6 +35,7 @@ import tools.shell
 import tools.image
 import tools.subagent
 import tools.channel
+import tools.discord_actions
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,9 @@ class Gateway:
             bus=self.bus,
             dispatcher=self.dispatcher,
             runtime=self.runtime,
-            config=self.config
+            config=self.config,
+            scheduler=self.scheduler,
+            channel_manager=self.channel_manager,
         )
         
         # 进程模式 (保留配置，Worker 迁移后使用)
@@ -194,11 +196,47 @@ class Gateway:
         if mcp_tools:
             logger.info(f"Registered {len(mcp_tools)} MCP tool(s): {mcp_tools}")
     
+    async def _ensure_sandbox_image(self):
+        """如果 sandbox 启用，确保 Docker 镜像存在（不存在则自动构建）"""
+        sandbox_config = self.config.get("sandbox", {})
+        if not sandbox_config.get("enabled", False):
+            return
+        
+        image = sandbox_config.get("image", "personalassistant-sandbox:latest")
+        
+        try:
+            import docker
+            client = docker.from_env()
+            client.images.get(image)
+            logger.info(f"Sandbox image found: {image}")
+        except docker.errors.ImageNotFound:
+            logger.info(f"Sandbox image '{image}' not found, building...")
+            try:
+                dockerfile_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "Dockerfile.sandbox")
+                if not os.path.exists(dockerfile_path):
+                    logger.warning(f"Dockerfile.sandbox not found, sandbox will not work")
+                    return
+                build_context = os.path.dirname(dockerfile_path)
+                client.images.build(
+                    path=build_context,
+                    dockerfile="Dockerfile.sandbox",
+                    tag=image,
+                    rm=True,
+                )
+                logger.info(f"Sandbox image built: {image}")
+            except Exception as e:
+                logger.warning(f"Failed to build sandbox image: {e}")
+        except docker.errors.DockerException as e:
+            logger.warning(f"Docker not available, sandbox disabled: {e}")
+        except Exception as e:
+            logger.warning(f"Sandbox image check failed: {e}")
+    
     async def run(self):
         """
         启动 Gateway 系统
         
         启动顺序:
+        0. 确保 Sandbox 镜像
         1. 初始化 MCP Servers
         2. 初始化 Channels
         3. 启动 Scheduler
@@ -206,6 +244,9 @@ class Gateway:
         5. 启动 Channel 监控
         6. 启动 FastAPI Server（阻塞）
         """
+        # 0. Sandbox 镜像
+        await self._ensure_sandbox_image()
+        
         # 1. MCP
         await self._init_mcp_servers()
         
@@ -239,44 +280,6 @@ class Gateway:
                 await shutdown_event.wait()
             except asyncio.CancelledError:
                 pass
-    
-    async def send_push(self, channel: str, user_id: str, text: str):
-        """
-        主动推送消息（供 Scheduler 等调用）
-        
-        通过 Dispatcher 路由到正确的 Channel。
-        """
-        await self.dispatcher.send_to_channel(
-            channel, user_id, OutgoingMessage(text=text)
-        )
-    
-    async def handle_cli(self, text: str, agent_id: str = "default") -> str:
-        """
-        CLI 单次对话（测试用）
-        
-        直接通过 MessageBus 发送并等待回复。
-        """
-        # 临时初始化 AgentLoop（不启动事件循环，而是手动处理一条）
-        if not self.agent_loop.agents:
-            self.agent_loop._init_agents()
-        
-        msg = IncomingMessage(
-            channel="cli",
-            user_id="cli_user",
-            text=text
-        )
-        
-        # 发布到 bus
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
-        from core.types import MessageEnvelope
-        envelope = MessageEnvelope(message=msg, reply_future=future)
-        
-        # 直接处理（不通过 bus，因为 AgentLoop 可能没在跑）
-        await self.agent_loop._handle_envelope(envelope)
-        
-        response = await future
-        return response.text
     
     async def shutdown(self):
         """关闭 Gateway"""

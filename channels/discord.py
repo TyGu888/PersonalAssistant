@@ -208,19 +208,14 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
                 raw=raw
             )
             
-            # 调用消息处理回调（会记录消息到 memory）
+            # 调用消息处理回调
             if reply_expected:
                 logger.info(f"Received message from user {user_id}: {message.content[:50]}...")
             else:
                 logger.debug(f"Recording group message from user {user_id} (no reply expected)")
             
-            outgoing_message = await self.publish_message(incoming_message)
-            
-            # 发送回复（只有 reply_expected 且有内容时才发送）
-            if reply_expected and outgoing_message and (outgoing_message.text or outgoing_message.attachments):
-                # Discord 消息长度限制 2000 字符，需要分片发送
-                await self._send_message(message.channel, outgoing_message.text, outgoing_message.attachments)
-                logger.info(f"Sent reply to user {user_id}")
+            # publish to bus (fire-and-forget, Dispatcher handles reply delivery)
+            await self.publish_message(incoming_message)
             
         except Exception as e:
             logger.error(f"Error handling Discord message: {e}", exc_info=True)
@@ -305,46 +300,57 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
                 else:
                     await channel.send(chunk)
     
-    async def send(self, user_id: str, message: OutgoingMessage):
+    async def deliver(self, target: dict, message: OutgoingMessage):
         """
-        主动发送消息
+        投递消息到 Discord 目标
         
-        用于定时提醒等主动推送场景
-        
-        通过 user_id 找到 user 对象发送 DM
+        target 字段:
+        - channel_id: Discord 频道/线程 ID (优先使用)
+        - user_id: 用户 ID (DM 回退)
         """
         try:
             if not self.client or not self.client.is_ready():
-                logger.error("Client not initialized or not ready, cannot send message")
+                logger.error("Discord client not ready, cannot deliver message")
                 return
             
             if not message or not message.text:
-                logger.warning("Empty message, skipping send")
+                logger.warning("Empty message, skipping deliver")
                 return
             
-            # 检查用户是否在白名单
-            if user_id not in self.allowed_users:
-                logger.warning(f"Cannot send message to unauthorized user {user_id}")
-                return
+            channel_id = target.get("channel_id")
+            user_id = target.get("user_id")
             
-            # 通过 user_id 获取 User 对象
-            try:
-                user = await self.client.fetch_user(int(user_id))
-            except discord.NotFound:
-                logger.error(f"User {user_id} not found")
-                return
-            except discord.HTTPException as e:
-                logger.error(f"Failed to fetch user {user_id}: {e}")
-                return
+            # 优先使用 channel_id (回复到原始频道/线程/DM)
+            if channel_id:
+                ch = self.client.get_channel(int(channel_id))
+                if not ch:
+                    try:
+                        ch = await self.client.fetch_channel(int(channel_id))
+                    except Exception as e:
+                        logger.error(f"Failed to fetch channel {channel_id}: {e}")
+                        ch = None
+                if ch:
+                    await self._send_message(ch, message.text, message.attachments)
+                    logger.info(f"Delivered message to Discord channel {channel_id}")
+                    return
             
-            # 发送 DM
-            dm_channel = await user.create_dm()
-            await self._send_message(dm_channel, message.text)
-            logger.info(f"Sent proactive message to user {user_id}")
-            
+            # 回退: DM 发送
+            if user_id:
+                if str(user_id) not in self.allowed_users:
+                    logger.warning(f"Cannot deliver to unauthorized user {user_id}")
+                    return
+                try:
+                    user = await self.client.fetch_user(int(user_id))
+                    dm = await user.create_dm()
+                    await self._send_message(dm, message.text, message.attachments)
+                    logger.info(f"Delivered DM to user {user_id}")
+                except Exception as e:
+                    logger.error(f"Failed to deliver DM to {user_id}: {e}")
+            else:
+                logger.warning(f"No valid target for Discord delivery: {target}")
+                
         except Exception as e:
-            logger.error(f"Error sending message to user {user_id}: {e}", exc_info=True)
-            raise
+            logger.error(f"Error delivering Discord message: {e}", exc_info=True)
     
     async def stop(self):
         """停止 Bot（会退出重连循环）"""

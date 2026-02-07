@@ -38,6 +38,7 @@ class BaseAgent:
         self.token_counter = TokenCounter(self.model)
         self.max_context_tokens = llm_config.get("max_context_tokens", 8000)
         self.max_response_tokens = llm_config.get("max_response_tokens")
+        self.max_iterations = llm_config.get("max_iterations", 20)
         
         # Provider 特定配置
         self.extra_params = llm_config.get("extra_params", {})
@@ -121,8 +122,8 @@ class BaseAgent:
         else:
             logger.debug(f"上下文 token 数: {total_tokens}/{self.max_context_tokens}")
         
-        # 最大 tool_calls 循环次数
-        max_iterations = 20
+        # 最大 tool_calls 循环次数（从 config.yaml agent.max_iterations 读取）
+        max_iterations = self.max_iterations
         iteration = 0
         
         # 构建 LLM 调用参数
@@ -275,10 +276,18 @@ class BaseAgent:
             for memory in memories:
                 result += f"\n- {memory}"
         
+        # 添加可用渠道信息
+        available_channels = msg_context.get("available_channels", []) if msg_context else []
+        if available_channels:
+            result += "\n\n## 可用渠道"
+            result += f"\n你可以通过 send_message 工具向以下渠道发送消息: {', '.join(available_channels)}"
+            result += "\n- 如果不指定 channel 和 user_id，默认回复当前对话"
+            result += "\n- 指定 channel 和 user_id 可以向其他渠道/用户主动发消息"
+        
         # 添加 NO_REPLY 机制说明
         result += "\n\n## 回复指南"
         result += "\n- 当你认为这条消息无需回复时（例如用户只是闲聊的一部分、感谢语、或消息不是针对你的），直接输出 `<NO_REPLY>` 作为完整回复"
-        result += "\n- 如果你已经通过工具发送了消息（如 discord_send_message、telegram_send_message），则不需要再生成文本回复，直接输出 `<NO_REPLY>`"
+        result += "\n- 如果你已经通过工具发送了消息（如 send_message），则不需要再生成文本回复，直接输出 `<NO_REPLY>`"
         result += "\n- 如果需要正常回复，直接输出回复内容即可（不要包含 <NO_REPLY>）"
         
         return result

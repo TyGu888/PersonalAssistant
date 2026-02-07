@@ -23,7 +23,7 @@ import uvicorn
 
 from gateway.bus import MessageBus
 from gateway.dispatcher import Dispatcher
-from core.types import IncomingMessage, OutgoingMessage
+from core.types import IncomingMessage
 
 logger = logging.getLogger(__name__)
 
@@ -175,19 +175,26 @@ class GatewayServer:
             WebSocket 连接端点
             
             协议：
-            - Client 连接后先发 {"type": "auth", "api_key": "xxx"} 认证
-            - 认证成功后发 {"type": "message", "text": "...", "user_id": "..."} 发送消息
-            - Server 回复 {"type": "reply", "text": "...", "session_id": "..."}
-            - Server 主动推送 {"type": "push", "text": "..."}
+            - Client → Server:
+              {"type": "auth", "api_key": "xxx"}                    认证
+              {"type": "message", "text": "...", "user_id": "..."}  发送消息
+              {"type": "register_tools", "tools": [...]}            注册客户端工具
+              {"type": "tool_result", "call_id": "...", "result": "...", "error": "..."} 工具执行结果
+            
+            - Server → Client:
+              {"type": "auth_ok", "connection_id": "..."}           认证成功
+              {"type": "reply", "text": "...", "session_id": "..."} 消息回复
+              {"type": "push", "text": "..."}                       主动推送
+              {"type": "tool_request", "call_id": "...", "tool_name": "...", "arguments": {...}} 工具调用请求
             """
             await websocket.accept()
             connection_id = str(uuid.uuid4())
             authenticated = not self.api_key  # 无 api_key 配置时默认已认证
             
             try:
-                # 注册 WS 连接到 Dispatcher（用于 Agent 主动推送）
-                async def ws_send(text: str):
-                    await websocket.send_json({"type": "push", "text": text})
+                # ws_send 发送任意 dict (由 Dispatcher 调用)
+                async def ws_send(data: dict):
+                    await websocket.send_json(data)
                 
                 while True:
                     data = await websocket.receive_json()
@@ -200,7 +207,6 @@ class GatewayServer:
                             await websocket.close(code=4001)
                             return
                         authenticated = True
-                        # 认证成功后注册到 Dispatcher
                         self.dispatcher.register_ws(connection_id, ws_send)
                         await websocket.send_json({"type": "auth_ok", "connection_id": connection_id})
                         continue
@@ -209,7 +215,26 @@ class GatewayServer:
                         await websocket.send_json({"type": "error", "message": "Not authenticated"})
                         continue
                     
-                    # 消息
+                    # 注册远程工具 (客户端提供工具给 Agent 使用)
+                    if msg_type == "register_tools":
+                        tools = data.get("tools", [])
+                        self.dispatcher.register_remote_tools(connection_id, tools)
+                        await websocket.send_json({
+                            "type": "tools_registered",
+                            "count": len(tools),
+                            "names": [t["name"] for t in tools]
+                        })
+                        continue
+                    
+                    # 工具执行结果 (客户端完成了 Agent 请求的工具调用)
+                    if msg_type == "tool_result":
+                        call_id = data.get("call_id", "")
+                        result = data.get("result", "")
+                        error = data.get("error")
+                        self.dispatcher.resolve_rpc_result(call_id, result, error)
+                        continue
+                    
+                    # 聊天消息
                     if msg_type == "message":
                         user_id = data.get("user_id", f"ws_{connection_id[:8]}")
                         text = data.get("text", "")

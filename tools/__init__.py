@@ -5,6 +5,8 @@ from tools import shell
 from tools import web
 from tools import image
 from tools import mcp_client
-from tools import discord
+from tools import discord_actions
 from tools import subagent
 from tools import memory
+from tools import channel
+from tools import sandbox

@@ -176,14 +176,9 @@ class TelegramChannel(BaseChannel, ReconnectMixin):
                 }
             )
             
-            # 调用消息处理回调
+            # 发布到 MessageBus（fire-and-forget，Dispatcher 会通过 deliver() 路由回复）
             logger.info(f"Received message from user {user_id}: {update.message.text[:50]}...")
-            outgoing_message = await self.publish_message(incoming_message)
-            
-            # 发送回复
-            if outgoing_message and outgoing_message.text:
-                await update.message.reply_text(outgoing_message.text)
-                logger.info(f"Sent reply to user {user_id}")
+            await self.publish_message(incoming_message)
             
         except Exception as e:
             logger.error(f"Error handling Telegram message: {e}", exc_info=True)
@@ -194,36 +189,40 @@ class TelegramChannel(BaseChannel, ReconnectMixin):
             except:
                 pass
     
-    async def send(self, user_id: str, message: OutgoingMessage):
+    async def deliver(self, target: dict, message: OutgoingMessage):
         """
-        主动发送消息
+        投递消息到 Telegram 目标
         
-        用于定时提醒等主动推送场景
+        target 字段:
+        - chat_id: Telegram chat ID (优先使用, 适用于私聊和群聊)
+        - user_id: 用户 ID (DM 回退)
         """
         try:
             if not self.application:
-                logger.error("Application not initialized, cannot send message")
+                logger.error("Telegram application not initialized, cannot deliver")
                 return
             
             if not message or not message.text:
-                logger.warning("Empty message, skipping send")
+                logger.warning("Empty message, skipping deliver")
                 return
             
-            # 检查用户是否在白名单
-            if user_id not in self.allowed_users:
-                logger.warning(f"Cannot send message to unauthorized user {user_id}")
+            chat_id = target.get("chat_id")
+            user_id = target.get("user_id")
+            
+            # 优先使用 chat_id (回复到原始会话)
+            target_id = chat_id or user_id
+            if not target_id:
+                logger.warning(f"No valid target for Telegram delivery: {target}")
                 return
             
-            # 发送消息
             await self.application.bot.send_message(
-                chat_id=user_id,
+                chat_id=int(target_id),
                 text=message.text
             )
-            logger.info(f"Sent proactive message to user {user_id}")
+            logger.info(f"Delivered Telegram message to chat {target_id}")
             
         except Exception as e:
-            logger.error(f"Error sending message to user {user_id}: {e}", exc_info=True)
-            raise
+            logger.error(f"Error delivering Telegram message: {e}", exc_info=True)
     
     async def stop(self):
         """停止 Bot（会退出重连循环）"""

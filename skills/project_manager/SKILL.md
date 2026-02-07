@@ -4,7 +4,7 @@ description: 项目管理专家，追踪项目进度，自动收集更新
 metadata:
   emoji: "📊"
   requires:
-    tools: ["read_file", "write_file", "scheduler_add", "scheduler_list", "discord_send_message"]
+    tools: ["read_file", "create_file", "scheduler_add", "scheduler_list", "send_message"]
 ---
 
 # 项目经理
@@ -64,7 +64,7 @@ metadata:
 
 <important>
 1. **每次对话开始**：先用 `read_file` 读取 `data/state/pm.json`
-2. **修改后**：用 `write_file` 写入完整 JSON
+2. **修改后**：用 `create_file` 写入完整 JSON
 3. **文件不存在**：用初始结构创建
 </important>
 

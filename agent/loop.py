@@ -44,6 +44,8 @@ class AgentLoop:
         dispatcher: Dispatcher,
         runtime: AgentRuntime,
         config: dict,
+        scheduler=None,
+        channel_manager=None,
     ):
         """
         参数:
@@ -51,11 +53,15 @@ class AgentLoop:
         - dispatcher: 出站消息路由
         - runtime: Agent 运行时（Memory + Tools）
         - config: 完整配置字典
+        - scheduler: APScheduler 实例（可选）
+        - channel_manager: ChannelManager 实例（供 channel-specific tools 使用）
         """
         self.bus = bus
         self.dispatcher = dispatcher
         self.runtime = runtime
         self.config = config
+        self._scheduler = scheduler
+        self._channel_manager = channel_manager
         
         # Agent 配置
         agent_config = config.get("agent", {})
@@ -68,6 +74,7 @@ class AgentLoop:
         # 运行状态
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._active_tasks: set[asyncio.Task] = set()  # 并发处理中的消息
     
     def _init_agents(self):
         """初始化 Agents 和 Skills"""
@@ -122,6 +129,11 @@ class AgentLoop:
         
         result["max_context_tokens"] = llm_cfg.get("max_context_tokens", 8000)
         result["max_response_tokens"] = llm_cfg.get("max_response_tokens")
+        
+        # Agent 行为配置
+        agent_cfg = self.config.get("agent", {})
+        result["max_iterations"] = agent_cfg.get("max_iterations", 20)
+        
         return result
     
     async def start(self):
@@ -132,7 +144,12 @@ class AgentLoop:
         logger.info("AgentLoop started")
     
     async def _run_loop(self):
-        """主循环"""
+        """
+        主循环 - 并发处理消息
+        
+        每条消息 spawn 一个 asyncio.Task，多条消息可以同时被 Agent 处理。
+        LLM 调用是 I/O-bound，asyncio 天然支持并发。
+        """
         logger.info(f"AgentLoop entering main loop (wake_interval={self.wake_interval}s)")
         
         while self._running:
@@ -148,27 +165,52 @@ class AgentLoop:
                     # 纯事件驱动，阻塞等待
                     envelope = await self.bus.consume()
                 
-                # 处理消息
-                await self._handle_envelope(envelope)
+                # 并发处理消息（不阻塞主循环）
+                task = asyncio.create_task(
+                    self._safe_handle_envelope(envelope),
+                    name=f"handle-{envelope.envelope_id[:8]}"
+                )
+                self._active_tasks.add(task)
+                task.add_done_callback(self._active_tasks.discard)
                 
             except asyncio.CancelledError:
-                logger.info("AgentLoop cancelled")
+                logger.info("AgentLoop cancelled, waiting for active tasks...")
+                # 等待所有活跃任务完成
+                if self._active_tasks:
+                    await asyncio.gather(*self._active_tasks, return_exceptions=True)
                 break
             except Exception as e:
                 logger.error(f"AgentLoop error: {e}", exc_info=True)
     
+    async def _safe_handle_envelope(self, envelope: MessageEnvelope):
+        """安全包装 _handle_envelope，捕获异常避免 task crash"""
+        try:
+            await self._handle_envelope(envelope)
+        except Exception as e:
+            logger.error(f"Unhandled error in envelope {envelope.envelope_id}: {e}", exc_info=True)
+    
     async def _on_wake(self):
         """
-        周期性唤醒回调
+        周期性唤醒 - 发布系统唤醒消息让 Agent 处理
         
-        Agent 定期醒来可以做的事情：
+        Agent 定期醒来可以:
         - 检查待办事项
         - 发送定时提醒
         - 主动问候
-        
-        当前实现：仅记录日志。后续可扩展。
         """
-        logger.debug("AgentLoop periodic wake (no pending messages)")
+        wake_msg = IncomingMessage(
+            channel="system",
+            user_id="system",
+            text="[Periodic Wake] You are waking up for a periodic check. Review if there are any pending tasks, reminders, or actions you should take. Use send_message tool if you need to reach out to someone.",
+            reply_expected=False,
+        )
+        envelope = MessageEnvelope(message=wake_msg)
+        task = asyncio.create_task(
+            self._safe_handle_envelope(envelope),
+            name=f"wake-{envelope.envelope_id[:8]}"
+        )
+        self._active_tasks.add(task)
+        task.add_done_callback(self._active_tasks.discard)
     
     async def _handle_envelope(self, envelope: MessageEnvelope):
         """处理一条消息"""
@@ -182,8 +224,9 @@ class AgentLoop:
             self.runtime.save_message(session_id, "user", msg.text)
             
             # 3. 检查是否需要回复
-            if not msg.reply_expected:
-                # 群聊未被 @ ，不需要回复
+            # 非 system 渠道且不期望回复（如群聊未被 @），跳过 Agent 处理
+            # system 唤醒消息虽然 reply_expected=False，但需要 Agent 处理（可能使用 tools）
+            if not msg.reply_expected and msg.channel != "system":
                 if envelope.reply_future and not envelope.reply_future.done():
                     envelope.reply_future.set_result(OutgoingMessage(text=""))
                 return
@@ -212,7 +255,8 @@ class AgentLoop:
                 "group_id": msg.group_id,
                 "is_owner": is_owner,
                 "session_id": session_id,
-                "raw": msg.raw
+                "raw": msg.raw,
+                "available_channels": self.dispatcher.list_channels(),
             }
             
             # 8. 加载上下文（历史 + 记忆）
@@ -225,13 +269,35 @@ class AgentLoop:
             # 9. 获取 Agent
             agent = self.agents.get(route.agent_id) or self.agents.get("default")
             
-            # 10. 获取 Tool schemas
+            # 10. 获取 Tool schemas (本地 + 远程)
             tools = self.runtime.get_tool_schemas(route.tools)
+            # 合并远程工具 schemas
+            remote_schemas = self.dispatcher.get_remote_tool_schemas()
+            if remote_schemas:
+                remote_tool_schemas = []
+                for schema in remote_schemas:
+                    remote_tool_schemas.append({
+                        "type": "function",
+                        "function": {
+                            "name": schema["name"],
+                            "description": schema.get("description", ""),
+                            "parameters": schema.get("parameters", {"type": "object", "properties": {}})
+                        }
+                    })
+                tools = tools + remote_tool_schemas
             
             # 11. 构建 tool_context
             tool_context = self.runtime.get_tool_context(person_id, session_id, msg_context)
             # 注入 dispatcher 供 channel tools 使用
             tool_context["dispatcher"] = self.dispatcher
+            # 注入 scheduler 供定时工具使用
+            if self._scheduler:
+                tool_context["scheduler"] = self._scheduler
+            # 注入 bus 供 auto_continue 定时任务使用
+            tool_context["bus"] = self.bus
+            # 注入 channel_manager 供 channel-specific tools 使用 (如 tools/discord.py)
+            if self._channel_manager:
+                tool_context["channel_manager"] = self._channel_manager
             
             # 12. 调用 Agent
             response_text = await agent.run(
@@ -278,6 +344,12 @@ class AgentLoop:
         """停止 AgentLoop"""
         logger.info("Stopping AgentLoop...")
         self._running = False
+        
+        # 等待所有活跃的消息处理任务完成
+        if self._active_tasks:
+            logger.info(f"Waiting for {len(self._active_tasks)} active task(s) to finish...")
+            await asyncio.gather(*self._active_tasks, return_exceptions=True)
+        
         if self._task and not self._task.done():
             self._task.cancel()
             try:

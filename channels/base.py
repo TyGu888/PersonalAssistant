@@ -119,23 +119,20 @@ class BaseChannel(ABC):
         from gateway.bus import MessageBus
         self._bus = bus
     
-    async def publish_message(self, msg: IncomingMessage) -> Optional[OutgoingMessage]:
+    async def publish_message(self, msg: IncomingMessage) -> None:
         """
-        发布消息到 MessageBus
+        发布消息到 MessageBus（fire-and-forget）
         
         Channel 收到消息后调用此方法。
-        对于需要同步回复的 Channel（如 Telegram 直接回复），
-        可以 await 获取回复。
+        不等待回复 - Dispatcher 会通过 channel.deliver() 路由回复。
         
         参数:
         - msg: 入站消息
-        
-        返回: OutgoingMessage（如果等待回复）或 None
         """
         if not self._bus:
             logger.error("MessageBus not set, cannot publish message")
             return None
-        return await self._bus.publish(msg, wait_reply=True)
+        await self._bus.publish(msg, wait_reply=False)
     
     @abstractmethod
     async def start(self):
@@ -143,8 +140,14 @@ class BaseChannel(ABC):
         pass
     
     @abstractmethod
-    async def send(self, user_id: str, message: OutgoingMessage):
-        """主动发送消息"""
+    async def deliver(self, target: dict, message: OutgoingMessage):
+        """
+        投递消息到目标
+        
+        target 是一个 dict，包含从原始消息的 raw 字段提取的路由信息，
+        例如 channel_id、chat_id、user_id 等，具体字段取决于 Channel 类型。
+        Dispatcher 通过此方法将回复路由回对应的会话。
+        """
         pass
     
     @abstractmethod

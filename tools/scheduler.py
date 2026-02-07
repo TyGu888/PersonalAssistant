@@ -1,9 +1,14 @@
-from tools.registry import registry
-from datetime import datetime, timedelta
-from dateutil import parser as date_parser
+import logging
 import uuid
+from datetime import datetime, timedelta
 from typing import Optional
+
+from dateutil import parser as date_parser
+
+from tools.registry import registry
 from core.types import IncomingMessage
+
+logger = logging.getLogger(__name__)
 
 
 def parse_reminder_time(time_str: str) -> datetime:
@@ -87,24 +92,18 @@ async def scheduler_add(time: str, content: str, user_id: str, channel: str, aut
     添加定时任务（使用注入的 context）
     
     context 包含:
-    - engine: Engine 实例（用于 send_push）
     - scheduler: APScheduler 实例
+    - bus: MessageBus 实例（用于投递唤醒消息）
     
     流程:
     1. 解析时间字符串（支持 'HH:MM' 和 'YYYY-MM-DD HH:MM'）
-    2. 创建 job callback（调用 engine.send_push）
+    2. 创建 job callback（通过 MessageBus 唤醒 Agent 处理）
     3. 使用 scheduler.add_job 添加任务
-    
-    返回: "已设置提醒：2026-01-28 10:00 - 复习 GRPO"
     """
     if context is None:
         return "错误: 缺少上下文信息"
     
-    engine = context.get("engine")
     scheduler = context.get("scheduler")
-    
-    if engine is None:
-        return "错误: 无法获取 engine 实例"
     if scheduler is None:
         return "错误: 无法获取 scheduler 实例"
     
@@ -122,30 +121,24 @@ async def scheduler_add(time: str, content: str, user_id: str, channel: str, aut
     # 生成唯一 job_id
     job_id = f"reminder_{user_id}_{uuid.uuid4().hex[:8]}"
     
-    # 调试日志
-    print(f"[DEBUG] scheduler_add: user_id={user_id}, job_id={job_id}")
+    logger.debug(f"scheduler_add: user_id={user_id}, job_id={job_id}")
+    
+    # 获取 bus 引用（用于投递唤醒消息给 Agent）
+    bus = context.get("bus")
     
     # 创建异步回调函数
-    # 注意：需要接受 kwargs 中的参数
     async def job_callback(content=None, user_id=None, channel=None, auto_continue=False):
         try:
-            if auto_continue:
-                # 循环提醒：构造系统消息，让 Agent 处理
-                system_msg = IncomingMessage(
-                    channel=channel,
-                    user_id=user_id,
-                    text=f"[定时任务触发] 内容：{content}。请提醒用户，并根据情况决定是否设置下一次提醒（使用 scheduler_add，记得设置 auto_continue=True）。"
-                )
-                print(f"[DEBUG] auto_continue 触发，调用 engine.handle()")
-                response = await engine.handle(system_msg)
-                # 发送 Agent 的回复给用户
-                await engine.send_push(channel, user_id, response.text)
-            else:
-                # 普通提醒：简单推送
-                await engine.send_push(channel, user_id, f"⏰ 提醒: {content}")
+            wake_msg = IncomingMessage(
+                channel="system",
+                user_id="system",
+                text=f"[Scheduled Reminder] Please remind user {user_id} on {channel}: {content}. Use send_message tool to deliver.",
+                reply_expected=False,
+                raw={"target_channel": channel, "target_user": user_id},
+            )
+            await bus.publish(wake_msg, wait_reply=False)
         except Exception as e:
-            # 记录错误，但不抛出异常（避免影响 scheduler）
-            print(f"提醒发送失败: {e}")
+            logger.error(f"Scheduled reminder failed: {e}", exc_info=True)
     
     # 添加任务到 scheduler，将元数据存储在 kwargs 中
     try:
@@ -204,17 +197,11 @@ async def scheduler_list(user_id: str, context=None) -> str:
         # 获取所有任务
         jobs = scheduler.get_jobs()
         
-        # 调试：打印所有 jobs
-        print(f"[DEBUG] scheduler_list called with user_id: {user_id}")
-        print(f"[DEBUG] All jobs in scheduler: {[job.id for job in jobs]}")
-        
         # 过滤出该用户的任务（job_id 格式为 reminder_{user_id}_{uuid}）
         user_jobs = []
         for job in jobs:
             if job.id and job.id.startswith(f"reminder_{user_id}_"):
                 user_jobs.append(job)
-        
-        print(f"[DEBUG] Filtered user_jobs: {[job.id for job in user_jobs]}")
         
         if not user_jobs:
             return f"用户 {user_id} 暂无定时提醒"

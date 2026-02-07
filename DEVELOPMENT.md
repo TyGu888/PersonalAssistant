@@ -1,6 +1,6 @@
 # Personal Agent Hub - 开发追踪
 
-> 最后更新: 2026-02-06
+> 最后更新: 2026-02-07
 
 快速了解项目架构和开发进展。
 
@@ -27,7 +27,7 @@
 
 ```
 personal_agent_hub/
-├── main.py                    # CLI 入口（start/chat/client）
+├── main.py                    # CLI 入口（start/client）
 ├── config.yaml                # 配置文件
 ├── Dockerfile.sandbox         # 沙箱镜像
 ├── gateway/                   # Gateway 中心枢纽
@@ -43,7 +43,6 @@ personal_agent_hub/
 │   └── default.py             # DefaultAgent（通用助手 + Skill 清单注入）
 ├── channels/                  # Channel Services（独立通讯服务）
 │   ├── base.py                # Channel 基类（MessageBus 集成 + ReconnectMixin）
-│   ├── cli.py                 # CLI Channel（本地调试）
 │   ├── telegram.py            # Telegram Bot（自动重连）
 │   └── discord.py             # Discord Bot（自动重连）
 ├── cli_client/                # 远程 CLI 客户端
@@ -51,6 +50,7 @@ personal_agent_hub/
 ├── tools/                     # 可插拔工具
 │   ├── registry.py            # Tool 注册系统（支持 MCP）
 │   ├── channel.py             # 跨渠道消息发送（send_message）
+│   ├── discord_actions.py     # Discord 特定操作（回复/反应/建线程）
 │   ├── scheduler.py           # 智能定时提醒（auto_continue）
 │   ├── filesystem.py          # 文件操作（edit/find/grep，支持 skills/ 和 data/）
 │   ├── shell.py               # Shell 命令（持久化会话）
@@ -100,7 +100,7 @@ AgentLoop
     ├── AgentRuntime.save_message("assistant", ...) → 保存回复
     └── Dispatcher.dispatch_reply(envelope, response)
           ├── reply_future.set_result() → 同步客户端（HTTP/WS）
-          └── channel.send() → 异步渠道（Discord/Telegram）
+          └── channel.deliver(target, msg) → 异步渠道（Discord/Telegram）
 ```
 
 ### 与旧架构对比
@@ -131,14 +131,14 @@ AgentLoop
 |------|------|
 | **gateway/app.py** | Gateway 主类，初始化和管理所有组件的生命周期 |
 | **gateway/bus.py** | MessageBus，Inbox 异步队列 + MessageEnvelope（含 reply Future） |
-| **gateway/dispatcher.py** | 出站消息路由，注册 Channel send 函数和 WebSocket 连接 |
+| **gateway/dispatcher.py** | 出站消息路由，注册 Channel deliver 函数和 WebSocket 连接 |
 | **gateway/channel_manager.py** | Channel 创建、Bus 注入、启动监控、指数退避重启 |
 | **gateway/server.py** | FastAPI 服务：POST /chat, WS /ws, 管理端点 |
 | **agent/loop.py** | Agent 事件驱动主循环，从 Bus 取消息，调用 Agent，分发回复 |
 | **agent/runtime.py** | Agent 运行时：持有 MemoryManager，加载上下文，身份解析 |
 | **agent/base.py** | BaseAgent：LLM 调用 + Tool 执行 + Token 管理 + 多模态 |
 | **agent/default.py** | DefaultAgent：通用助手，Skill 清单注入 |
-| **channels/base.py** | Channel 基类：publish_message() + ReconnectMixin |
+| **channels/base.py** | Channel 基类：publish_message() (fire-and-forget) + deliver(target, msg) + ReconnectMixin |
 | **tools/channel.py** | send_message 工具：Agent 主动向任意 Channel 发消息 |
 | **tools/registry.py** | Tool 注册装饰器，支持本地函数和 MCP 工具 |
 | **cli_client/client.py** | WebSocket CLI 客户端，类 Claude Code 风格 |
@@ -196,7 +196,7 @@ async def my_tool(arg1: str, context=None) -> str:
 
 ### 添加新 Channel
 
-继承 `BaseChannel`，实现 `start()`, `send()`, `stop()`。使用 `self.publish_message(msg)` 发布到 MessageBus。ChannelManager 自动注入 Bus 和注册 Dispatcher。
+继承 `BaseChannel`，实现 `start()`, `deliver(target, msg)`, `stop()`。使用 `self.publish_message(msg)` 发布到 MessageBus。ChannelManager 自动注入 Bus 和注册 Dispatcher。
 
 ---
 
@@ -237,22 +237,17 @@ agent:
 
 ### 测试指南
 
-1. **快速单条对话**
-   ```bash
-   python main.py chat "你好"
-   ```
-
-2. **完整启动（Gateway + Channels + Agent）**
+1. **完整启动（Gateway + Channels + Agent）**
    ```bash
    python main.py start
    ```
    通过 Discord 发消息测试多轮对话、Tool 调用等。
 
-3. **CLI Client 测试（WebSocket）**
+2. **CLI Client 测试（WebSocket）**
    - 终端 1: `python main.py start`
    - 终端 2: `python main.py client`
 
-4. **按功能抽查**
+3. **按功能抽查**
    - 学习/复习 → DefaultAgent 加载 study_coach Skill
    - 搜索/网页 → web_search / fetch_url
    - 执行/命令 → run_command, sandbox_*
@@ -278,7 +273,7 @@ agent:
 |------|------|------|
 | **Gateway** | app, bus, dispatcher, channel_manager, server | ✅ |
 | **Agent** | loop, runtime, base, default | ✅ |
-| **Channels** | CLI, Telegram, Discord | ✅ |
+| **Channels** | Telegram, Discord | ✅ |
 | **Tools** | registry, channel, scheduler, filesystem, shell, web, image, sandbox, mcp_client, memory, subagent | ✅ |
 | **Memory** | session, global_mem (scope + person_id), manager (Token 截断 + Identity Mapping) | ✅ |
 | **Skills** | loader (插件式), study_coach, coding_assistant, project_manager | ✅ |
@@ -317,12 +312,17 @@ agent:
 - [x] Sub-Agent 系统
 - [x] send_message Tool（Agent 主动跨渠道发消息）
 - [x] CLI Client（WebSocket 连接 Gateway）
+- [x] Unified deliver pattern（Dispatcher → channel.deliver）
+- [x] WebSocket RPC（CLI Client 提供工具给 Agent）
+- [x] System wake messages（周期性唤醒 + 定时任务唤醒）
 
 ### 待测试
 
-- [ ] Discord Channel 在新架构下的完整对话
-- [ ] CLI Client 连接 Gateway 交互
+- [ ] Discord Channel deliver 模式完整对话
+- [ ] Telegram Channel deliver 模式完整对话  
+- [ ] CLI Client WebSocket RPC 工具调用
 - [ ] 周期性唤醒 (wake_interval > 0)
+- [ ] Scheduler 唤醒 Agent 后使用 send_message 投递
 - [ ] Worker 分离模式在新架构下运行
 
 ---
@@ -331,6 +331,7 @@ agent:
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-02-07 | **统一出站路径重构**。Channel.send() → deliver(target, msg)；Dispatcher 统一路由回复和主动消息；删除 CLI Channel（cli_client 替代）；Scheduler 回调改为 MessageBus 唤醒；Agent 周期性唤醒发布系统消息；WebSocket RPC 支持远程工具调用 |
 | 2026-02-06 | **架构重构：Agent-Centric**。MessageBus 解耦 Channel 和 Agent；Agent 自主管理 Memory；Gateway 替代 Engine；FastAPI + WebSocket 服务；CLI Client；send_message Tool |
 | 2026-02-05 | Skill 系统重构：从 Agent 替换模式改为插件式按需加载 |
 | 2026-02-05 | Filesystem 路径扩展：支持访问 skills/ 和 data/ 目录 |
@@ -356,6 +357,8 @@ agent:
 | `channels/http.py` | `gateway/server.py` |
 | `agents/base.py` | `agent/base.py` |
 | `agents/study_coach.py` | `agent/default.py` |
+| `channels/cli.py` | `cli_client/client.py` |
+| `tools/discord.py` | `tools/discord_actions.py` |
 
 ---
 
