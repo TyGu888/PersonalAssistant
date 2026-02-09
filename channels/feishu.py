@@ -247,9 +247,12 @@ class FeishuChannel(BaseChannel, ReconnectMixin):
                 logger.error("Feishu client not initialized, cannot deliver")
                 return
             
-            if not message or not message.text:
+            if not message:
+                return
+            if not message.text and not getattr(message, "attachments", None):
                 logger.warning("Empty message, skipping Feishu deliver")
                 return
+            text = message.text or "（见附件）"
             
             import lark_oapi as lark
             from lark_oapi.api.im.v1 import (
@@ -267,7 +270,7 @@ class FeishuChannel(BaseChannel, ReconnectMixin):
                 logger.warning(f"No valid target for Feishu delivery: {target}")
                 return
             
-            content = json.dumps({"text": message.text})
+            content = json.dumps({"text": text})
             
             request = CreateMessageRequest.builder() \
                 .receive_id_type(receive_id_type) \
@@ -284,6 +287,53 @@ class FeishuChannel(BaseChannel, ReconnectMixin):
                 logger.info(f"Delivered Feishu message to {receive_id_type}:{receive_id}")
             else:
                 logger.error(f"Feishu send failed: code={response.code}, msg={response.msg}")
+            
+            # 发送附件
+            import os
+            from lark_oapi.api.im.v1 import (
+                CreateFileRequest, CreateFileRequestBody,
+            )
+            for file_path in (message.attachments or []):
+                if not os.path.exists(file_path):
+                    logger.warning(f"Feishu attachment not found: {file_path}")
+                    continue
+                try:
+                    # 1. 上传文件
+                    filename = os.path.basename(file_path)
+                    with open(file_path, 'rb') as f:
+                        upload_req = CreateFileRequest.builder() \
+                            .request_body(CreateFileRequestBody.builder()
+                                .file_type("stream")
+                                .file_name(filename)
+                                .file(f)
+                                .build()) \
+                            .build()
+                        upload_resp = await self.lark_client.im.v1.file.acreate(upload_req)
+                    
+                    if not upload_resp.success():
+                        logger.error(f"Feishu file upload failed: {upload_resp.code} {upload_resp.msg}")
+                        continue
+                    
+                    file_key = upload_resp.data.file_key
+                    
+                    # 2. 发送文件消息
+                    file_content = json.dumps({"file_key": file_key})
+                    file_msg_req = CreateMessageRequest.builder() \
+                        .receive_id_type(receive_id_type) \
+                        .request_body(CreateMessageRequestBody.builder()
+                            .receive_id(receive_id)
+                            .msg_type("file")
+                            .content(file_content)
+                            .build()) \
+                        .build()
+                    file_msg_resp = await self.lark_client.im.v1.message.acreate(file_msg_req)
+                    
+                    if file_msg_resp.success():
+                        logger.info(f"Delivered Feishu attachment: {filename}")
+                    else:
+                        logger.error(f"Feishu file message failed: {file_msg_resp.code} {file_msg_resp.msg}")
+                except Exception as e:
+                    logger.error(f"Failed to send Feishu attachment {file_path}: {e}")
                 
         except Exception as e:
             logger.error(f"Error delivering Feishu message: {e}", exc_info=True)

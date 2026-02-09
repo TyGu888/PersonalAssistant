@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import time
+from pathlib import Path
 from typing import Optional, Union
 
 import discord
@@ -8,6 +10,10 @@ from channels.base import BaseChannel, ReconnectMixin
 from core.types import IncomingMessage, OutgoingMessage
 
 logger = logging.getLogger(__name__)
+
+# 用户上传文件存放目录（相对于项目根目录）
+UPLOAD_DIR = "data/workspace/uploads"
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 
 class DiscordChannel(BaseChannel, ReconnectMixin):
@@ -148,7 +154,38 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
             logger.debug(f"Error closing client: {e}")
         finally:
             self.client = None
-    
+
+    async def _download_attachments(self, discord_attachments) -> tuple[list[str], list[str]]:
+        """
+        下载 Discord 附件到工作区，按类型分类。
+
+        返回: (images, attachments) — 均为相对于项目根的路径，供 read_file 等使用。
+        """
+        project_root = Path(__file__).resolve().parent.parent
+        upload_dir = (project_root / UPLOAD_DIR.lstrip("./")).resolve()
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        images: list[str] = []
+        attachments: list[str] = []
+
+        for att in discord_attachments:
+            ext = Path(att.filename).suffix.lower()
+            safe_name = f"{int(time.time())}_{att.filename}"
+            local_path = upload_dir / safe_name
+            try:
+                await att.save(str(local_path))
+            except Exception as e:
+                logger.warning(f"Failed to save Discord attachment {att.filename}: {e}")
+                continue
+            # 相对路径，便于 Agent 用 read_file("data/workspace/uploads/...") 访问
+            rel_path = (Path(UPLOAD_DIR) / safe_name).as_posix()
+            if ext in IMAGE_EXTS:
+                images.append(rel_path)
+            else:
+                attachments.append(rel_path)
+
+        return images, attachments
+
     async def _on_message(self, message: discord.Message):
         """
         Discord 消息处理
@@ -170,11 +207,11 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
             # 过滤 bot 自己的消息
             if message.author.bot:
                 return
-            
-            # 检查是否有消息内容
-            if not message.content:
+
+            # 至少要有文本或附件之一
+            if not message.content and not message.attachments:
                 return
-            
+
             # 获取用户 ID
             user_id = str(message.author.id)
             
@@ -229,21 +266,33 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
                     raw["parent_channel_name"] = message.channel.parent.name
             else:
                 raw["is_thread"] = False
-            
+
+            # 下载附件到工作区，分类为图片与非图片
+            images: list[str] = []
+            attachments: list[str] = []
+            if message.attachments:
+                images, attachments = await self._download_attachments(message.attachments)
+                if images or attachments:
+                    logger.info(f"Downloaded {len(images)} image(s), {len(attachments)} file(s) from user {user_id}")
+
             # 构建 IncomingMessage
+            text = message.content or ""
             incoming_message = IncomingMessage(
                 channel="discord",
                 user_id=user_id,
-                text=message.content,
+                text=text,
                 is_group=is_group,
                 group_id=group_id,
                 reply_expected=reply_expected,
-                raw=raw
+                raw=raw,
+                images=images,
+                attachments=attachments,
             )
-            
+
             # 调用消息处理回调
             if reply_expected:
-                logger.info(f"Received message from user {user_id}: {message.content[:50]}...")
+                log_preview = (text[:50] + "...") if len(text) > 50 else text
+                logger.info(f"Received message from user {user_id}: {log_preview or '(with attachments)'}")
             else:
                 logger.debug(f"Recording group message from user {user_id} (no reply expected)")
             
@@ -346,9 +395,13 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
                 logger.error("Discord client not ready, cannot deliver message")
                 return
             
-            if not message or not message.text:
+            if not message:
+                return
+            # 无正文且无附件时跳过；仅有附件时照常发送（正文用占位）
+            if not message.text and not getattr(message, "attachments", None):
                 logger.warning("Empty message, skipping deliver")
                 return
+            text = message.text or "（见附件）"
             
             channel_id = target.get("channel_id")
             user_id = target.get("user_id")
@@ -363,7 +416,7 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
                         logger.error(f"Failed to fetch channel {channel_id}: {e}")
                         ch = None
                 if ch:
-                    await self._send_message(ch, message.text, message.attachments)
+                    await self._send_message(ch, text, message.attachments)
                     logger.info(f"Delivered message to Discord channel {channel_id}")
                     return
             
@@ -375,7 +428,7 @@ class DiscordChannel(BaseChannel, ReconnectMixin):
                 try:
                     user = await self.client.fetch_user(int(user_id))
                     dm = await user.create_dm()
-                    await self._send_message(dm, message.text, message.attachments)
+                    await self._send_message(dm, text, message.attachments)
                     logger.info(f"Delivered DM to user {user_id}")
                 except Exception as e:
                     logger.error(f"Failed to deliver DM to {user_id}: {e}")

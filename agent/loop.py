@@ -133,6 +133,7 @@ class AgentLoop:
         # Agent 行为配置
         agent_cfg = self.config.get("agent", {})
         result["max_iterations"] = agent_cfg.get("max_iterations", 20)
+        result["llm_call_timeout"] = agent_cfg.get("llm_call_timeout", 120)
         
         return result
     
@@ -193,15 +194,32 @@ class AgentLoop:
         """
         周期性唤醒 - 发布系统唤醒消息让 Agent 处理
         
-        Agent 定期醒来可以:
-        - 检查待办事项
-        - 发送定时提醒
-        - 主动问候
+        注意：
+        - 如果上一次唤醒还在处理中，跳过本次（避免并发唤醒堆积）
+        - 唤醒 prompt 明确约束 Agent 行为，避免自作主张
         """
+        # 如果有任何活跃的 wake task 还在跑，跳过本次
+        for t in self._active_tasks:
+            if t.get_name().startswith("wake-"):
+                logger.debug("Skipping periodic wake: previous wake task still running")
+                return
+        
         wake_msg = IncomingMessage(
             channel="system",
             user_id="system",
-            text="[Periodic Wake] You are waking up for a periodic check. Review if there are any pending tasks, reminders, or actions you should take. Use send_message tool if you need to reach out to someone.",
+            text=(
+                "[Periodic Wake] You are waking up for a routine check.\n"
+                "Based on your role and responsibilities (defined in system prompt), decide what to do:\n"
+                "- Check if any of your duties require action right now (e.g. monitoring, data checks, proactive alerts)\n"
+                "- Use tools as needed (web_search, send_message, etc.) to fulfill your responsibilities\n"
+                "- Use send_message to notify users on the appropriate channel if you find something noteworthy\n"
+                "\n"
+                "Constraints:\n"
+                "- Do NOT re-execute old reminders or past scheduler tasks. They fire independently.\n"
+                "- Do NOT repeat actions you already completed in previous wake cycles.\n"
+                "- Do NOT add new scheduler_add during wake. Reminders are only added when the user explicitly asks (e.g. \"设个提醒\"). Wake is for checking, not for creating new recurring tasks.\n"
+                "- If nothing requires attention right now, respond with <NO_REPLY>."
+            ),
             reply_expected=False,
         )
         envelope = MessageEnvelope(message=wake_msg)
@@ -220,8 +238,9 @@ class AgentLoop:
             # 1. 获取 session_id
             session_id = msg.get_session_id()
             
-            # 2. 保存用户消息
-            self.runtime.save_message(session_id, "user", msg.text)
+            # 2. 保存用户消息（系统唤醒消息不保存，避免污染对话历史）
+            if msg.channel != "system":
+                self.runtime.save_message(session_id, "user", msg.text)
             
             # 3. 检查是否需要回复
             # 非 system 渠道且不期望回复（如群聊未被 @），跳过 Agent 处理
@@ -249,6 +268,7 @@ class AgentLoop:
             
             msg_context = {
                 "user_id": msg.user_id,
+                "person_id": person_id,  # 统一身份 ID，single_owner 时为 "owner"，multi_user 时为 "channel:user_id"
                 "channel": msg.channel,
                 "timestamp": msg.timestamp,
                 "is_group": msg.is_group,
@@ -258,14 +278,28 @@ class AgentLoop:
                 "raw": msg.raw,
                 "available_channels": self.dispatcher.list_channels(),
                 "contacts": self._channel_manager.get_contacts_summary() if self._channel_manager else {},
+                "attachments": msg.attachments if msg.attachments else [],
             }
+            # 系统唤醒消息限制最大迭代次数，防止 Agent 自作主张无限调 tool
+            if msg.channel == "system":
+                msg_context["max_iterations"] = 3
             
             # 8. 加载上下文（历史 + 记忆）
-            context = await self.runtime.load_context(
-                session_id=session_id,
-                query=msg.text,
-                person_id=person_id
-            )
+            # 系统唤醒消息：跳过对话历史（避免被旧对话污染），但保留记忆
+            # Agent 醒来时靠 system prompt（含 Skill 职责）+ memories 决定行动
+            if msg.channel == "system":
+                context = await self.runtime.load_context(
+                    session_id=session_id,
+                    query=msg.text,
+                    person_id=person_id,
+                    history_limit=0
+                )
+            else:
+                context = await self.runtime.load_context(
+                    session_id=session_id,
+                    query=msg.text,
+                    person_id=person_id
+                )
             
             # 9. 获取 Agent
             agent = self.agents.get(route.agent_id) or self.agents.get("default")
@@ -317,8 +351,9 @@ class AgentLoop:
                 logger.debug(f"Agent returned NO_REPLY for {msg.user_id}")
                 response = OutgoingMessage(text="")
             else:
-                # 14. 保存 assistant 回复
-                self.runtime.save_message(session_id, "assistant", response_text)
+                # 14. 保存 assistant 回复（系统唤醒消息不保存）
+                if msg.channel != "system":
+                    self.runtime.save_message(session_id, "assistant", response_text)
                 response = OutgoingMessage(text=response_text, attachments=attachments)
             
             # 15. 回复

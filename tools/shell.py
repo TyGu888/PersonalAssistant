@@ -752,3 +752,140 @@ async def shell_session_list(context=None) -> str:
         lines.append("")
     
     return "\n".join(lines)
+
+
+# =====================
+# Docker 沙箱管理工具（从 sandbox.py 迁移）
+# sandbox_exec 和 sandbox_start 已移除（run_command 自动路由到沙箱）
+# =====================
+
+
+@registry.register(
+    name="sandbox_stop",
+    description="停止 Docker 沙箱容器",
+    parameters={
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+)
+async def sandbox_stop(context=None) -> str:
+    """停止沙箱容器"""
+    sandbox_module = _get_sandbox_module()
+    try:
+        sandbox = sandbox_module.get_sandbox()
+        if not sandbox.is_running():
+            return "沙箱容器未运行"
+        await sandbox.stop()
+        sandbox_module._sandbox_instance = None
+        return "沙箱容器已停止并清理"
+    except Exception as e:
+        return f"停止沙箱失败: {e}"
+
+
+@registry.register(
+    name="sandbox_status",
+    description="查看 Docker 沙箱状态",
+    parameters={
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+)
+async def sandbox_status(context=None) -> str:
+    """查看沙箱状态"""
+    try:
+        sandbox_module = _get_sandbox_module()
+        config = sandbox_module._get_sandbox_config()
+        sandbox = sandbox_module.get_sandbox()
+        is_running = sandbox.is_running()
+
+        status_lines = [
+            "=== Docker 沙箱状态 ===",
+            f"配置启用: {'是' if config.get('enabled') else '否'}",
+            f"容器运行: {'是' if is_running else '否'}",
+            f"镜像: {config.get('image')}",
+            f"内存限制: {config.get('memory_limit')}",
+            f"CPU 限制: {config.get('cpu_limit')}",
+            f"网络模式: {config.get('network')}",
+        ]
+        if is_running and sandbox.container:
+            status_lines.append(f"容器 ID: {sandbox.container.id[:12]}")
+        return "\n".join(status_lines)
+    except Exception as e:
+        return f"获取状态失败: {e}"
+
+
+@registry.register(
+    name="sandbox_copy_to",
+    description="复制文件到 Docker 沙箱容器",
+    parameters={
+        "type": "object",
+        "properties": {
+            "local_path": {
+                "type": "string",
+                "description": "本地文件路径"
+            },
+            "container_path": {
+                "type": "string",
+                "description": "容器内目标目录",
+                "default": "/workspace"
+            }
+        },
+        "required": ["local_path"]
+    }
+)
+async def sandbox_copy_to(
+    local_path: str,
+    container_path: str = "/workspace",
+    context=None
+) -> str:
+    """复制文件到沙箱"""
+    try:
+        sandbox_module = _get_sandbox_module()
+        sandbox = sandbox_module.get_sandbox()
+        if not sandbox.is_running():
+            return "沙箱容器未运行，请先执行一条命令以自动启动"
+        await sandbox.copy_to(local_path, container_path)
+        return f"已复制文件到沙箱\n本地: {local_path}\n容器: {container_path}"
+    except FileNotFoundError as e:
+        return f"文件不存在: {e}"
+    except Exception as e:
+        return f"复制文件失败: {e}"
+
+
+@registry.register(
+    name="sandbox_copy_from",
+    description="从 Docker 沙箱容器复制文件",
+    parameters={
+        "type": "object",
+        "properties": {
+            "container_path": {
+                "type": "string",
+                "description": "容器内文件路径"
+            },
+            "local_path": {
+                "type": "string",
+                "description": "本地目标路径"
+            }
+        },
+        "required": ["container_path", "local_path"]
+    }
+)
+async def sandbox_copy_from(
+    container_path: str,
+    local_path: str,
+    context=None
+) -> str:
+    """从沙箱复制文件"""
+    try:
+        sandbox_module = _get_sandbox_module()
+        sandbox = sandbox_module.get_sandbox()
+        if not sandbox.is_running():
+            return "沙箱容器未运行，请先执行一条命令以自动启动"
+        await sandbox.copy_from(container_path, local_path)
+        return f"已从沙箱复制文件\n容器: {container_path}\n本地: {local_path}"
+    except FileNotFoundError as e:
+        return f"文件不存在: {e}"
+    except Exception as e:
+        return f"复制文件失败: {e}"

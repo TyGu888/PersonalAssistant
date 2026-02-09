@@ -312,29 +312,19 @@ async def delete_file(filename: str, context=None) -> str:
 
 @registry.register(
     name="send_file",
-    description="将工作区的文件发送给用户（作为附件）",
+    description="将工作区的文件发送给用户（作为附件）。发送时的正文由你在后续回复中自然说出，本工具只负责挂上附件。",
     parameters={
         "type": "object",
         "properties": {
-            "filename": {"type": "string", "description": "文件名（相对于工作区）"},
-            "message": {"type": "string", "description": "附带的消息（可选）", "default": ""}
+            "filename": {"type": "string", "description": "文件名（相对于工作区）"}
         },
         "required": ["filename"]
     }
 )
 async def send_file(filename: str, message: str = "", context=None) -> str:
     """
-    发送文件给用户
-    
-    流程:
-    1. 验证路径安全性
-    2. 检查文件是否存在
-    3. 将文件路径添加到响应的 attachments 中
-    
-    注意: 这个 tool 会在 context 中标记需要发送的文件，
-    由 Channel 层实际发送附件。
-    
-    返回: "文件将发送给用户: {filename}" 或错误信息
+    将文件加入本次回复的附件列表，由 Channel 在发送最终回复时一并发出。
+    回复的正文由 Agent 的下一轮输出决定；message 参数仅为兼容旧调用，未使用。
     """
     try:
         safe_path = _safe_path(filename)

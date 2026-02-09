@@ -16,7 +16,7 @@ Python version of OpenClawd
 - **多模态支持**: 图片处理与 Vision API 集成
 - **Docker 沙箱**: 容器隔离执行 Shell 命令
 - **进程解耦**: Gateway/Agent 分离，Worker 进程池
-- **Sub-Agent 系统**: 生成子 Agent 执行复杂任务
+- **周期性唤醒**: Agent 按 Skill 职责主动巡检和行动
 - **Memory Tools**: Agent 主动搜索和添加记忆
 
 ## 快速开始
@@ -146,13 +146,12 @@ personal_agent_hub/
 │   ├── qq_actions.py          # QQ 特定操作（反应/置顶）
 │   ├── scheduler.py           # 定时提醒
 │   ├── filesystem.py          # 文件操作
-│   ├── shell.py               # Shell 执行
+│   ├── shell.py               # Shell 执行 + 持久化会话 + Docker 沙箱管理
 │   ├── web.py                 # 网页搜索/抓取
 │   ├── image.py               # 图片处理
-│   ├── sandbox.py             # Docker 沙箱
+│   ├── sandbox.py             # Docker 沙箱基础设施（DockerSandbox 类）
 │   ├── mcp_client.py          # MCP 协议客户端
-│   ├── memory.py              # 记忆工具
-│   └── subagent.py            # Sub-Agent 系统
+│   └── memory.py              # 记忆工具
 ├── skills/                    # Skills 插件目录
 │   ├── loader.py              # Skill 加载器
 │   ├── study_coach/SKILL.md

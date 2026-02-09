@@ -141,6 +141,29 @@ class ChannelManager:
         """Get the current contacts registry"""
         return dict(self.contacts)
     
+    def remove_contact(self, channel_name: str, path: list) -> bool:
+        """
+        从通讯录中移除一条记录（按路径）。
+        
+        path: 交替的 key 与 id，如 ["guilds", "123"] 移除 guild 123，
+              ["guilds", "123", "channels", "456"] 移除该 guild 下的 channel 456。
+        返回: True 若移除成功，False 若路径不存在或无效。
+        """
+        if channel_name not in self.contacts or len(path) < 2 or len(path) % 2 != 0:
+            return False
+        parent = self.contacts[channel_name]
+        for i in range(0, len(path) - 2, 2):
+            k, v = path[i], path[i + 1]
+            if k not in parent or v not in parent[k]:
+                return False
+            parent = parent[k][v]
+        k, v = path[-2], path[-1]
+        if k not in parent or v not in parent[k]:
+            return False
+        del parent[k][v]
+        logger.info(f"Removed contact {channel_name} path={path}")
+        return True
+    
     def report_contacts(self, channel_name: str, info: dict):
         """Called by channels after startup scan to report initial contacts"""
         self.update_contacts(channel_name, info)

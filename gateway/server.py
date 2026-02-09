@@ -14,10 +14,12 @@ import asyncio
 import json
 import logging
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Depends, Header, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -135,6 +137,22 @@ class GatewayServer:
     
     def _setup_routes(self):
         
+        # 工作区静态文件预览（只读，供浏览器打开 PPT 预览图等）
+        _workspace_dir = Path(__file__).resolve().parent.parent / "data" / "workspace"
+
+        @self.app.get("/workspace/{path:path}", tags=["Preview"])
+        async def serve_workspace_file(path: str):
+            """
+            以只读方式提供 data/workspace 下的文件，用于预览。
+            例如 Agent 生成 preview/slide-1.png 后，可打开: http://localhost:8080/workspace/preview/slide-1.png
+            """
+            if not path or ".." in path or path.startswith("/"):
+                raise HTTPException(status_code=400, detail="Invalid path")
+            full = (_workspace_dir / path).resolve()
+            if not full.is_relative_to(_workspace_dir) or not full.exists() or not full.is_file():
+                raise HTTPException(status_code=404, detail="Not found")
+            return FileResponse(full)
+
         @self.app.post("/chat", response_model=ChatResponse, tags=["Chat"])
         async def chat(request: ChatRequest, _=Depends(self._verify_api_key)):
             """发送消息并获取回复（同步）"""

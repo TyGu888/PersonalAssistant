@@ -216,9 +216,12 @@ class TelegramChannel(BaseChannel, ReconnectMixin):
                 logger.error("Telegram application not initialized, cannot deliver")
                 return
             
-            if not message or not message.text:
+            if not message:
+                return
+            if not message.text and not getattr(message, "attachments", None):
                 logger.warning("Empty message, skipping deliver")
                 return
+            text = message.text or "（见附件）"
             
             chat_id = target.get("chat_id")
             user_id = target.get("user_id")
@@ -231,9 +234,26 @@ class TelegramChannel(BaseChannel, ReconnectMixin):
             
             await self.application.bot.send_message(
                 chat_id=int(target_id),
-                text=message.text
+                text=text
             )
             logger.info(f"Delivered Telegram message to chat {target_id}")
+            
+            # 发送附件
+            import os
+            for file_path in (message.attachments or []):
+                if os.path.exists(file_path):
+                    try:
+                        with open(file_path, 'rb') as f:
+                            await self.application.bot.send_document(
+                                chat_id=int(target_id),
+                                document=f,
+                                filename=os.path.basename(file_path)
+                            )
+                        logger.info(f"Delivered Telegram attachment: {os.path.basename(file_path)}")
+                    except Exception as e:
+                        logger.error(f"Failed to send Telegram attachment {file_path}: {e}")
+                else:
+                    logger.warning(f"Telegram attachment not found: {file_path}")
             
         except Exception as e:
             logger.error(f"Error delivering Telegram message: {e}", exc_info=True)

@@ -134,14 +134,16 @@ class SlackChannel(BaseChannel, ReconnectMixin):
         # We only want to process: DMs (always) and channel messages (record but don't reply)
         is_group = not is_dm
         
+        thread_ts = event.get("thread_ts") or event.get("ts")
         raw = {
             "channel_id": channel_id,
-            "thread_ts": event.get("thread_ts") or event.get("ts"),
+            "thread_ts": thread_ts,
             "ts": event.get("ts"),
             "user_id": user_id,
             "team_id": event.get("team"),
             "channel_type": channel_type,
         }
+        await self._add_author_name_to_raw(raw, user_id)
         
         incoming = IncomingMessage(
             channel="slack",
@@ -149,6 +151,7 @@ class SlackChannel(BaseChannel, ReconnectMixin):
             text=event.get("text", ""),
             is_group=is_group,
             group_id=channel_id if is_group else None,
+            thread_id=thread_ts if is_group else None,  # 按 thread 隔离 session，同 channel 不同 thread 不混
             reply_expected=is_dm,  # DMs always reply; channel messages only if mentioned
             raw=raw,
         )
@@ -175,14 +178,16 @@ class SlackChannel(BaseChannel, ReconnectMixin):
         import re
         text = re.sub(r'<@[A-Z0-9]+>\s*', '', text).strip()
         
+        thread_ts = event.get("thread_ts") or event.get("ts")
         raw = {
             "channel_id": channel_id,
-            "thread_ts": event.get("thread_ts") or event.get("ts"),
+            "thread_ts": thread_ts,
             "ts": event.get("ts"),
             "user_id": user_id,
             "team_id": event.get("team"),
             "channel_type": "channel",
         }
+        await self._add_author_name_to_raw(raw, user_id)
         
         incoming = IncomingMessage(
             channel="slack",
@@ -190,12 +195,32 @@ class SlackChannel(BaseChannel, ReconnectMixin):
             text=text,
             is_group=True,
             group_id=channel_id,
+            thread_id=thread_ts,  # 按 thread 隔离 session
             reply_expected=True,
             raw=raw,
         )
         
         logger.info(f"Slack mention from {user_id} in {channel_id}: {text[:50]}...")
         await self.publish_message(incoming)
+    
+    async def _add_author_name_to_raw(self, raw: dict, user_id: str):
+        """Fetch Slack user display name and add to raw for PM/attribution."""
+        if not self.client or not user_id:
+            return
+        try:
+            resp = await self.client.users_info(user=user_id)
+            if not resp.get("ok"):
+                return
+            user = resp.get("user", {})
+            profile = user.get("profile", {})
+            real_name = user.get("real_name") or profile.get("real_name")
+            display_name = profile.get("display_name") or real_name
+            if real_name:
+                raw["author_real_name"] = real_name
+            if display_name:
+                raw["author_display_name"] = display_name
+        except Exception as e:
+            logger.debug(f"Slack users_info for {user_id}: {e}")
     
     def extract_contact_info(self, msg: IncomingMessage) -> dict:
         """Extract contact info from Slack message"""
@@ -205,7 +230,8 @@ class SlackChannel(BaseChannel, ReconnectMixin):
         channel_type = raw.get("channel_type", "")
         
         if channel_type == "im" and msg.user_id:
-            info["dm_users"] = {str(msg.user_id): {"name": str(msg.user_id)}}
+            name = raw.get("author_display_name") or raw.get("author_real_name") or str(msg.user_id)
+            info["dm_users"] = {str(msg.user_id): {"name": name}}
         elif channel_id:
             info["channels"] = {channel_id: {"name": channel_id, "type": channel_type}}
         
@@ -218,16 +244,23 @@ class SlackChannel(BaseChannel, ReconnectMixin):
                 logger.error("Slack client not initialized, cannot deliver")
                 return
             
-            if not message or not message.text:
+            if not message:
+                return
+            # 无正文且无附件时跳过；仅有附件时照常发送（正文用占位）
+            if not message.text and not getattr(message, "attachments", None):
                 logger.warning("Empty message, skipping Slack deliver")
                 return
+            text = message.text or "（见附件）"
             
             channel_id = target.get("channel_id")
             thread_ts = target.get("thread_ts")
             user_id = target.get("user_id")
             
+            # 确定投递目标 channel
+            deliver_channel = None
             if channel_id:
-                kwargs = {"channel": channel_id, "text": message.text}
+                deliver_channel = channel_id
+                kwargs = {"channel": channel_id, "text": text}
                 if thread_ts:
                     kwargs["thread_ts"] = thread_ts
                 await self.client.chat_postMessage(**kwargs)
@@ -235,11 +268,28 @@ class SlackChannel(BaseChannel, ReconnectMixin):
             elif user_id:
                 # Open DM and send
                 result = await self.client.conversations_open(users=[user_id])
-                dm_channel = result["channel"]["id"]
-                await self.client.chat_postMessage(channel=dm_channel, text=message.text)
+                deliver_channel = result["channel"]["id"]
+                await self.client.chat_postMessage(channel=deliver_channel, text=text)
                 logger.info(f"Delivered Slack DM to user {user_id}")
             else:
                 logger.warning(f"No valid target for Slack delivery: {target}")
+            
+            # 发送附件
+            import os
+            if deliver_channel:
+                for file_path in (message.attachments or []):
+                    if os.path.exists(file_path):
+                        try:
+                            await self.client.files_upload_v2(
+                                channel=deliver_channel,
+                                file=file_path,
+                                filename=os.path.basename(file_path)
+                            )
+                            logger.info(f"Delivered Slack attachment: {os.path.basename(file_path)}")
+                        except Exception as e:
+                            logger.error(f"Failed to send Slack attachment {file_path}: {e}")
+                    else:
+                        logger.warning(f"Slack attachment not found: {file_path}")
                 
         except Exception as e:
             logger.error(f"Error delivering Slack message: {e}", exc_info=True)

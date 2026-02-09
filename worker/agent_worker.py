@@ -54,15 +54,17 @@ class WorkerSchedulerProxy:
         """
         模拟 scheduler.add_job
         
-        将操作收集到 pending_scheduler_ops 中。
+        将操作收集到 pending_scheduler_ops 中。func 为字符串时（如 tools.scheduler:run_scheduled_reminder）供持久化与 Gateway 重放使用。
         """
+        func_ref = func if isinstance(func, str) else getattr(func, "__module__", "") + ":" + getattr(func, "__name__", "")
         self.pending_scheduler_ops.append({
             "op": "add",
+            "func": func_ref,
             "trigger": trigger,
             "run_date": run_date.isoformat() if run_date else None,
             "job_id": id,
             "kwargs": kwargs or {},
-            "replace_existing": replace_existing
+            "replace_existing": replace_existing,
         })
         
         # 本地缓存

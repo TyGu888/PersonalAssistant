@@ -1,5 +1,5 @@
 """
-Docker 沙箱模块 - 提供容器隔离执行环境
+Docker 沙箱模块 - 提供容器隔离执行环境（纯基础设施，无工具注册）
 
 功能：
 - 创建隔离的 Docker 容器执行命令
@@ -7,6 +7,11 @@ Docker 沙箱模块 - 提供容器隔离执行环境
 - 资源限制（内存、CPU）
 - 超时保护
 - 文件复制（双向）
+
+注意：
+- 所有工具注册已移至 tools/shell.py
+- 本模块仅提供 DockerSandbox 类和辅助函数
+- shell.py 通过 get_sandbox() / is_sandbox_enabled() 使用本模块
 """
 
 import docker
@@ -16,7 +21,6 @@ import io
 import os
 from typing import Optional, Tuple
 from pathlib import Path
-from tools.registry import registry
 
 
 class DockerSandbox:
@@ -427,236 +431,6 @@ def is_sandbox_enabled() -> bool:
     return config.get("enabled", False)
 
 
-# =====================
-# 注册 Tool
-# =====================
 
-@registry.register(
-    name="sandbox_start",
-    description="启动 Docker 沙箱容器",
-    parameters={
-        "type": "object",
-        "properties": {
-            "workspace_dir": {
-                "type": "string",
-                "description": "可选的工作目录挂载路径"
-            }
-        },
-        "required": []
-    }
-)
-async def sandbox_start(workspace_dir: str = None, context=None) -> str:
-    """启动沙箱容器"""
-    try:
-        sandbox = get_sandbox()
-        container_id = await sandbox.start(workspace_dir)
-        return f"沙箱容器已启动\n容器 ID: {container_id[:12]}\n镜像: {sandbox.image}"
-    except Exception as e:
-        return f"启动沙箱失败: {e}"
-
-
-@registry.register(
-    name="sandbox_exec",
-    description="在 Docker 沙箱中执行命令",
-    parameters={
-        "type": "object",
-        "properties": {
-            "command": {
-                "type": "string",
-                "description": "要执行的命令"
-            },
-            "timeout": {
-                "type": "integer",
-                "description": "超时秒数",
-                "default": 30
-            },
-            "working_dir": {
-                "type": "string",
-                "description": "工作目录",
-                "default": "/workspace"
-            }
-        },
-        "required": ["command"]
-    }
-)
-async def sandbox_exec(
-    command: str,
-    timeout: int = 30,
-    working_dir: str = "/workspace",
-    context=None
-) -> str:
-    """在沙箱中执行命令"""
-    try:
-        sandbox = get_sandbox()
-        
-        # 如果沙箱未运行，自动启动
-        if not sandbox.is_running():
-            await sandbox.start()
-        
-        exit_code, output = await sandbox.execute_with_timeout(
-            command=command,
-            timeout=timeout,
-            working_dir=working_dir
-        )
-        
-        # 截断过长输出
-        MAX_OUTPUT_LENGTH = 2000
-        if len(output) > MAX_OUTPUT_LENGTH:
-            output = output[:MAX_OUTPUT_LENGTH] + f"\n... (输出已截断，共 {len(output)} 字符)"
-        
-        result_lines = [
-            f"命令: {command}",
-            f"工作目录: {working_dir}",
-            f"退出码: {exit_code}",
-        ]
-        
-        if output:
-            result_lines.append("输出:")
-            result_lines.append(output)
-        else:
-            result_lines.append("输出: (无)")
-        
-        return "\n".join(result_lines)
-        
-    except Exception as e:
-        return f"执行命令失败: {e}"
-
-
-@registry.register(
-    name="sandbox_stop",
-    description="停止 Docker 沙箱容器",
-    parameters={
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-)
-async def sandbox_stop(context=None) -> str:
-    """停止沙箱容器"""
-    global _sandbox_instance
-    
-    try:
-        if _sandbox_instance is None or not _sandbox_instance.is_running():
-            return "沙箱容器未运行"
-        
-        await _sandbox_instance.stop()
-        _sandbox_instance = None
-        return "沙箱容器已停止并清理"
-        
-    except Exception as e:
-        return f"停止沙箱失败: {e}"
-
-
-@registry.register(
-    name="sandbox_copy_to",
-    description="复制文件到 Docker 沙箱容器",
-    parameters={
-        "type": "object",
-        "properties": {
-            "local_path": {
-                "type": "string",
-                "description": "本地文件路径"
-            },
-            "container_path": {
-                "type": "string",
-                "description": "容器内目标目录",
-                "default": "/workspace"
-            }
-        },
-        "required": ["local_path"]
-    }
-)
-async def sandbox_copy_to(
-    local_path: str,
-    container_path: str = "/workspace",
-    context=None
-) -> str:
-    """复制文件到沙箱"""
-    try:
-        sandbox = get_sandbox()
-        
-        if not sandbox.is_running():
-            return "沙箱容器未运行，请先启动"
-        
-        await sandbox.copy_to(local_path, container_path)
-        return f"已复制文件到沙箱\n本地: {local_path}\n容器: {container_path}"
-        
-    except FileNotFoundError as e:
-        return f"文件不存在: {e}"
-    except Exception as e:
-        return f"复制文件失败: {e}"
-
-
-@registry.register(
-    name="sandbox_copy_from",
-    description="从 Docker 沙箱容器复制文件",
-    parameters={
-        "type": "object",
-        "properties": {
-            "container_path": {
-                "type": "string",
-                "description": "容器内文件路径"
-            },
-            "local_path": {
-                "type": "string",
-                "description": "本地目标路径"
-            }
-        },
-        "required": ["container_path", "local_path"]
-    }
-)
-async def sandbox_copy_from(
-    container_path: str,
-    local_path: str,
-    context=None
-) -> str:
-    """从沙箱复制文件"""
-    try:
-        sandbox = get_sandbox()
-        
-        if not sandbox.is_running():
-            return "沙箱容器未运行，请先启动"
-        
-        await sandbox.copy_from(container_path, local_path)
-        return f"已从沙箱复制文件\n容器: {container_path}\n本地: {local_path}"
-        
-    except FileNotFoundError as e:
-        return f"文件不存在: {e}"
-    except Exception as e:
-        return f"复制文件失败: {e}"
-
-
-@registry.register(
-    name="sandbox_status",
-    description="查看 Docker 沙箱状态",
-    parameters={
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-)
-async def sandbox_status(context=None) -> str:
-    """查看沙箱状态"""
-    try:
-        config = _get_sandbox_config()
-        sandbox = get_sandbox()
-        
-        is_running = sandbox.is_running()
-        
-        status_lines = [
-            "=== Docker 沙箱状态 ===",
-            f"配置启用: {'是' if config.get('enabled') else '否'}",
-            f"容器运行: {'是' if is_running else '否'}",
-            f"镜像: {config.get('image')}",
-            f"内存限制: {config.get('memory_limit')}",
-            f"CPU 限制: {config.get('cpu_limit')}",
-            f"网络模式: {config.get('network')}",
-        ]
-        
-        if is_running and sandbox.container:
-            status_lines.append(f"容器 ID: {sandbox.container.id[:12]}")
-        
-        return "\n".join(status_lines)
-        
-    except Exception as e:
-        return f"获取状态失败: {e}"
+# 工具注册已全部移至 tools/shell.py
+# 本模块仅提供 DockerSandbox 类和辅助函数：get_sandbox(), is_sandbox_enabled(), _get_sandbox_config()

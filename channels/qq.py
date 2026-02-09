@@ -12,6 +12,7 @@ QQ Channel - QQ 频道/群/C2C 机器人
 
 import asyncio
 import logging
+import os
 import threading
 from typing import Optional
 
@@ -259,9 +260,12 @@ class QQChannel(BaseChannel, ReconnectMixin):
                 logger.error("QQ bot client not initialized, cannot deliver")
                 return
 
-            if not message or not message.text:
+            if not message:
+                return
+            if not message.text and not getattr(message, "attachments", None):
                 logger.warning("Empty message, skipping QQ deliver")
                 return
+            text = message.text or "（见附件）"
 
             api = self.bot_client.api
             msg_type = target.get("msg_type", "")
@@ -269,7 +273,7 @@ class QQChannel(BaseChannel, ReconnectMixin):
 
             if msg_type == "guild" and target.get("channel_id"):
                 # Guild channel message
-                kwargs = {"channel_id": target["channel_id"], "content": message.text}
+                kwargs = {"channel_id": target["channel_id"], "content": text}
                 if msg_id:
                     kwargs["msg_id"] = msg_id
                 await api.post_message(**kwargs)
@@ -280,7 +284,7 @@ class QQChannel(BaseChannel, ReconnectMixin):
                 kwargs = {
                     "group_openid": target["group_openid"],
                     "msg_type": 0,
-                    "content": message.text,
+                    "content": text,
                 }
                 if msg_id:
                     kwargs["msg_id"] = msg_id
@@ -292,7 +296,7 @@ class QQChannel(BaseChannel, ReconnectMixin):
                 kwargs = {
                     "openid": target["user_openid"],
                     "msg_type": 0,
-                    "content": message.text,
+                    "content": text,
                 }
                 if msg_id:
                     kwargs["msg_id"] = msg_id
@@ -301,6 +305,14 @@ class QQChannel(BaseChannel, ReconnectMixin):
 
             else:
                 logger.warning(f"No valid target for QQ delivery: {target}")
+            
+            # QQ Bot API 不支持发送任意文件附件，记录警告
+            if message.attachments:
+                logger.warning(
+                    f"QQ channel does not support file attachments. "
+                    f"Skipping {len(message.attachments)} attachment(s): "
+                    f"{[os.path.basename(p) for p in message.attachments]}"
+                )
 
         except Exception as e:
             logger.error(f"Error delivering QQ message: {e}", exc_info=True)

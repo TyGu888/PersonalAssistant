@@ -43,8 +43,9 @@ gateway:
 
 # Agent 配置 (新架构)
 agent:
-  wake_interval: 0         # 周期性唤醒间隔（秒），0 = 仅事件驱动
-  max_iterations: 50       # 单次对话最大 tool call 循环次数
+  wake_interval: 0      # 周期性唤醒间隔（秒），0 = 仅事件驱动
+  max_iterations: 50     # 单次对话最大 tool call 循环次数
+  llm_call_timeout: 600  # 单次 LLM 调用总超时（秒），含推理/思考时间
 
 # 数据目录（SQLite + ChromaDB）
 data:
@@ -62,6 +63,8 @@ skills:
     coding_assistant:
       enabled: true
     project_manager:
+      enabled: true
+    ppt_assistant:
       enabled: true
 
 # Memory 配置
@@ -81,7 +84,7 @@ channels:
     token: ${DISCORD_BOT_TOKEN}
     allowed_users: ["968804902337912883"]  # 白名单
   slack:
-    enabled: false
+    enabled: true
     bot_token: ${SLACK_BOT_TOKEN}   # xoxb-...
     app_token: ${SLACK_APP_TOKEN}   # xapp-...
     allowed_users: []
@@ -123,8 +126,9 @@ routing:
       # 文件操作
       create_file, read_file, list_files, append_file, delete_file, send_file, 
       edit_file, find_files, grep_files,
-      # 网络
+      # 网络 / 浏览器
       web_search, fetch_url,
+      browser_open, browser_goto, browser_click, browser_fill, browser_snapshot, browser_screenshot, browser_close,
       # 定时提醒
       scheduler_add, scheduler_list, scheduler_cancel,
       # Shell / 沙箱
@@ -133,8 +137,8 @@ routing:
       memory_search, memory_add,
       # Sub-Agent
       agent_spawn, agent_list, agent_send, agent_history,
-      # Channel (主动发消息)
-      send_message
+      # Channel (主动发消息 + 通讯录)
+      send_message, get_contacts, contact_remove
     ]
 
 # Docker 沙箱配置

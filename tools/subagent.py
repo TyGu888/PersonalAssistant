@@ -1,12 +1,21 @@
 """
-Sub-Agent Tools - 子 Agent 管理工具
+Sub-Agent Tools - 子 Agent 管理工具（已禁用）
 
-提供:
+TODO: 迁移到新架构
+  - agent_spawn/agent_send 使用旧的 engine.handle() API，在 Agent-Centric 架构中已不存在
+  - 需要改为通过 MessageBus 发布 IncomingMessage 来启动子 Agent
+  - agent_list/agent_history 的数据结构可以复用
+
+原功能:
 - agent_spawn: 生成子 Agent 执行任务
 - agent_list: 列出子 Agent 状态
 - agent_send: 给子 Agent 发消息
 - agent_history: 获取子 Agent 对话历史
 """
+
+# All tool registrations in this module are disabled.
+# The module is not imported in tools/__init__.py.
+# To re-enable, migrate agent_spawn to use MessageBus instead of engine.handle().
 
 from tools.registry import registry
 from core.types import IncomingMessage

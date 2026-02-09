@@ -57,7 +57,7 @@ class AgentRuntime:
             return "owner"
         return f"{channel}:{user_id}"
     
-    async def load_context(self, session_id: str, query: str, person_id: str) -> dict:
+    async def load_context(self, session_id: str, query: str, person_id: str, history_limit: int = None) -> dict:
         """
         加载会话上下文（历史 + 相关记忆，带 Token 截断）
         
@@ -65,15 +65,16 @@ class AgentRuntime:
         - session_id: 会话 ID
         - query: 当前查询（用于记忆检索）
         - person_id: 统一身份标识
+        - history_limit: 历史消息数量限制（None=使用配置默认值，0=不加载历史）
         
         返回: {"history": list[ChatMessage], "memories": list[str]}
         """
-        max_context_messages = self.memory_config.get("max_context_messages", 20)
+        effective_limit = history_limit if history_limit is not None else self.memory_config.get("max_context_messages", 20)
         context = await self.memory.get_context(
             session_id=session_id,
             query=query,
             person_id=person_id,
-            history_limit=max_context_messages
+            history_limit=effective_limit
         )
         return context
     

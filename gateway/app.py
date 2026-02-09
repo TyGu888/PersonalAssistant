@@ -17,6 +17,7 @@ import yaml
 from typing import Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
 from gateway.bus import MessageBus
 from gateway.dispatcher import Dispatcher
@@ -32,6 +33,7 @@ import tools.scheduler
 import tools.filesystem
 import tools.web
 import tools.shell
+import tools.browser
 import tools.image
 import tools.subagent
 import tools.channel
@@ -62,7 +64,14 @@ class Gateway:
         # 核心组件
         self.bus = MessageBus()
         self.dispatcher = Dispatcher()
-        self.scheduler = AsyncIOScheduler()
+        
+        # Scheduler：使用 SQLite jobstore 持久化，重启后任务保留
+        data_dir = self.config.get("data", {}).get("dir", "./data")
+        os.makedirs(data_dir, exist_ok=True)
+        db_path = os.path.join(data_dir, "scheduler.db")
+        jobstore_url = "sqlite:///" + os.path.abspath(db_path).replace("\\", "/")
+        jobstores = {"default": SQLAlchemyJobStore(url=jobstore_url)}
+        self.scheduler = AsyncIOScheduler(jobstores=jobstores)
         
         # Channel 管理
         self.channel_manager = ChannelManager(
@@ -197,7 +206,7 @@ class Gateway:
             logger.info(f"Registered {len(mcp_tools)} MCP tool(s): {mcp_tools}")
     
     async def _ensure_sandbox_image(self):
-        """如果 sandbox 启用，确保 Docker 镜像存在（不存在则自动构建）"""
+        """如果 sandbox 启用，确保 Docker 守护进程可用且镜像存在（不存在则自动构建）"""
         sandbox_config = self.config.get("sandbox", {})
         if not sandbox_config.get("enabled", False):
             return
@@ -207,6 +216,12 @@ class Gateway:
         try:
             import docker
             client = docker.from_env()
+            client.ping()
+        except Exception as e:
+            logger.warning(f"Docker 未运行或不可达，沙箱将不可用: {e}")
+            return
+        
+        try:
             client.images.get(image)
             logger.info(f"Sandbox image found: {image}")
         except docker.errors.ImageNotFound:
@@ -253,7 +268,9 @@ class Gateway:
         # 2. Channels
         self.channel_manager.init_channels()
         
-        # 3. Scheduler
+        # 3. Scheduler（注入 bus 供持久化 job 回调使用，再启动）
+        import tools.scheduler as scheduler_module
+        scheduler_module._reminder_bus = self.bus
         self.scheduler.start()
         
         # 4. AgentLoop

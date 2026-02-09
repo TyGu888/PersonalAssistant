@@ -8,11 +8,13 @@ Channel Tools - Agent 主动通讯工具
 - Agent 需要在另一个 Channel 上通知用户
 - Agent 需要在群里主动发消息
 - Agent 需要向特定用户推送信息
+- Agent 可查询/管理通讯录（get_contacts、contact_remove）
 """
 
+import json
+import logging
 from tools.registry import registry
 from core.types import OutgoingMessage
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -84,3 +86,71 @@ async def send_message(text: str, channel: str = None, channel_id: str = None, u
     except Exception as e:
         logger.error(f"send_message failed: {e}", exc_info=True)
         return f"发送失败: {str(e)}"
+
+
+@registry.register(
+    name="get_contacts",
+    description="获取当前通讯录（所有已连接渠道的 guild/channel/chat 等）。用于查看可联系的渠道与目标 ID，或为 contact_remove 构造 path。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "channel": {
+                "type": "string",
+                "description": "可选。只查看该渠道的通讯录，如 'discord'；省略则返回全部渠道"
+            }
+        },
+        "required": [],
+    },
+)
+async def get_contacts(channel: str = None, context=None) -> str:
+    """返回当前通讯录（JSON 或可读摘要）"""
+    if not context:
+        return "错误：缺少执行上下文"
+    cm = context.get("channel_manager")
+    if not cm:
+        return "错误：无法获取通讯录（channel_manager 未配置）"
+    summary = cm.get_contacts_summary()
+    if not summary:
+        return "当前通讯录为空（尚无渠道上报或尚未连接）"
+    if channel:
+        if channel not in summary:
+            return f"渠道 {channel} 不在通讯录中。已连接渠道: {list(summary.keys())}"
+        summary = {channel: summary[channel]}
+    try:
+        return json.dumps(summary, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        return str(summary)
+
+
+@registry.register(
+    name="contact_remove",
+    description="从通讯录中移除一条记录（如已解散的群/频道）。path 为交替的 key 与 id，例如 Discord 移除 guild: ['guilds','guild_id']，移除该 guild 下某 channel: ['guilds','guild_id','channels','channel_id']。删除前应征得用户确认。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "channel_name": {
+                "type": "string",
+                "description": "渠道名，如 'discord', 'telegram'"
+            },
+            "path": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "路径列表，如 ['guilds','123'] 或 ['guilds','123','channels','456']"
+            }
+        },
+        "required": ["channel_name", "path"],
+    },
+)
+async def contact_remove(channel_name: str, path: list, context=None) -> str:
+    """从通讯录中移除指定路径的条目"""
+    if not context:
+        return "错误：缺少执行上下文"
+    cm = context.get("channel_manager")
+    if not cm:
+        return "错误：无法管理通讯录（channel_manager 未配置）"
+    if not path or len(path) % 2 != 0:
+        return "错误：path 必须为偶数个元素，如 ['guilds','guild_id'] 或 ['guilds','guild_id','channels','channel_id']"
+    ok = cm.remove_contact(channel_name, path)
+    if ok:
+        return f"已从通讯录移除 {channel_name} 的条目 path={path}"
+    return f"移除失败：path 不存在或无效。请先用 get_contacts 查看该渠道结构后构造正确 path。"

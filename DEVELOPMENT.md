@@ -59,13 +59,13 @@ personal_agent_hub/
 │   ├── qq_actions.py          # QQ 特定操作（反应/置顶）
 │   ├── scheduler.py           # 智能定时提醒（auto_continue）
 │   ├── filesystem.py          # 文件操作（edit/find/grep，支持 skills/ 和 data/）
-│   ├── shell.py               # Shell 命令（持久化会话）
+│   ├── shell.py               # Shell 命令 + 持久化会话 + Docker 沙箱管理
 │   ├── web.py                 # 网页搜索 / 抓取
 │   ├── image.py               # 图片处理 (Pillow)
-│   ├── sandbox.py             # Docker 沙箱
+│   ├── sandbox.py             # Docker 沙箱基础设施（DockerSandbox 类，无工具注册）
 │   ├── mcp_client.py          # MCP 协议客户端
 │   ├── memory.py              # 记忆工具（search/add）
-│   └── subagent.py            # Sub-Agent 系统
+│   └── subagent.py            # Sub-Agent 系统（已禁用，待迁移到 MessageBus）
 ├── skills/                    # 插件式 Skills（Agent 按需加载）
 │   ├── loader.py              # Skill 加载器 + get_skill_summaries()
 │   ├── study_coach/SKILL.md
@@ -150,6 +150,9 @@ AgentLoop
 | **channels/qq.py** | QQ Bot (频道/群/C2C, botpy.Client) |
 | **tools/channel.py** | send_message 工具：Agent 主动向任意 Channel 发消息 |
 | **tools/registry.py** | Tool 注册装饰器，支持本地函数和 MCP 工具 |
+| **tools/shell.py** | Shell 命令 (run_command + 持久化会话) + Docker 沙箱管理 (stop/status/copy) |
+| **tools/sandbox.py** | Docker 沙箱基础设施（DockerSandbox 类），无工具注册，被 shell.py 调用 |
+| **tools/subagent.py** | Sub-Agent 系统（已禁用，待迁移到 MessageBus） |
 | **tools/slack_actions.py** | Slack Thread 回复、反应、置顶 |
 | **tools/feishu_actions.py** | 飞书消息回复、反应、置顶、建群 |
 | **tools/qq_actions.py** | QQ 表情反应、消息置顶 |
@@ -286,7 +289,8 @@ agent:
 | **Gateway** | app, bus, dispatcher, channel_manager, server | ✅ |
 | **Agent** | loop, runtime, base, default | ✅ |
 | **Channels** | Telegram, Discord, Slack, Feishu, QQ | ✅ |
-| **Tools** | registry, channel, scheduler, filesystem, shell, web, image, sandbox, mcp_client, memory, subagent | ✅ |
+| **Tools** | registry, channel, scheduler (含 SQLite 持久化), filesystem, shell (含沙箱管理), web, image, browser (Playwright), sandbox (基础设施), mcp_client, memory | ✅ |
+| **Tools (禁用)** | subagent（待迁移到 MessageBus） | ⏸️ |
 | **Memory** | session, global_mem (scope + person_id), manager (Token 截断 + Identity Mapping) | ✅ |
 | **Skills** | loader (插件式), study_coach, coding_assistant, project_manager | ✅ |
 | **Worker** | agent_worker (使用 AgentRuntime), agent_client, pool, protocol | ✅ |
@@ -344,12 +348,22 @@ agent:
 - [ ] Contact Registry 启动扫描验证
 - [ ] 周期性唤醒通讯录可见性验证
 
+### 运行中已知问题（可选优化）
+
+| 现象 | 说明与建议 |
+|------|------------|
+| LLM 120s/182s 超时 | 已支持 `config.agent.llm_call_timeout`（默认 120）。若仍超时，可适当调大或检查模型侧延迟。 |
+| 同渠道多会话并发 | Slack 已按 thread_id 隔离 session；若多 thread 同时进消息会串行处理。如需严格串行可按 channel+thread 加锁（未实现）。 |
+| Ctrl+C 时 posthog atexit 报错 | 本仓库未依赖 posthog；若出现多为 IDE/环境注入。可在 main 的 signal 处理里忽略 atexit 阶段的 KeyboardInterrupt（按需）。 |
+
 ---
 
 ## 更新日志
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-02-07 | **Scheduler 持久化 + Browser 工具**。定时提醒使用 SQLite jobstore（data/scheduler.db），重启后任务保留；回调改为模块级 `run_scheduled_reminder` 以支持序列化。新增 browser_*（Playwright）：browser_open/goto/click/fill/snapshot/close，需 `playwright install chromium`。 |
+| 2026-02-07 | **Tool 清理 + Wake 机制修复**。禁用 subagent 工具（待迁移 MessageBus）；sandbox 工具合并到 shell.py（移除冗余 sandbox_exec/sandbox_start，sandbox.py 保留为纯基础设施）；修复周期性唤醒：不加载对话历史（防污染）、保留 memories、限制 max_iterations=3、跳过并发 wake、通讯录概要注入普通对话 |
 | 2026-02-07 | **新增 Slack/飞书/QQ Channel + Contact Registry**。三个新渠道完整接入（收发消息、deliver 模式、平台特有操作工具）；Contact Registry 通讯录系统（启动扫描 + 懒积累 + 唤醒时注入 system prompt）|
 | 2026-02-07 | **统一出站路径重构**。Channel.send() → deliver(target, msg)；Dispatcher 统一路由回复和主动消息；删除 CLI Channel（cli_client 替代）；Scheduler 回调改为 MessageBus 唤醒；Agent 周期性唤醒发布系统消息；WebSocket RPC 支持远程工具调用 |
 | 2026-02-06 | **架构重构：Agent-Centric**。MessageBus 解耦 Channel 和 Agent；Agent 自主管理 Memory；Gateway 替代 Engine；FastAPI + WebSocket 服务；CLI Client；send_message Tool |
@@ -395,6 +409,8 @@ qq-botpy>=1.1.5
 openai>=1.0.0
 chromadb>=0.4.0
 apscheduler>=3.10.0
+sqlalchemy>=2.0.0
+playwright>=1.40.0
 pyyaml>=6.0
 python-dateutil>=2.8.0
 ddgs>=7.0.0
@@ -421,7 +437,7 @@ docker>=6.0.0
 | 微信 Channel | 个人微信 / 企业微信接入 |
 | cron 增强 | 完整 cron 表达式、recurring jobs |
 | 后台进程管理 | process_start, process_list, process_kill |
-| 无头浏览器 | browser_* (Playwright) |
+| 无头浏览器 | browser_* (Playwright)（已实现） |
 | Mac/iOS Client | 远程 Client 通过 WebSocket 执行本地操作 |
 
 ### 中期
@@ -431,6 +447,7 @@ docker>=6.0.0
 | 动态 Prompt | 根据任务类型、用户历史动态生成 prompt |
 | 插件系统 | Channel/Tool 作为独立包动态加载 |
 | Web 前端 | 管理界面 + 对话 UI |
+mac，ios，window，linux系统的系统工具？以及可能的截图，点击操作？
 
 ### 长期
 

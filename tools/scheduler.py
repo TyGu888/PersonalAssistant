@@ -10,6 +10,36 @@ from core.types import IncomingMessage
 
 logger = logging.getLogger(__name__)
 
+# 供持久化 job 使用：Gateway 启动时注入，触发时用其 publish 唤醒消息
+_reminder_bus = None
+
+# 持久化 job 必须用可序列化的函数引用（模块路径字符串），此为实际执行的回调
+REMINDER_JOB_FUNC = "tools.scheduler:run_scheduled_reminder"
+
+
+async def run_scheduled_reminder(
+    content: Optional[str] = None,
+    user_id: Optional[str] = None,
+    channel: Optional[str] = None,
+    auto_continue: bool = False,
+):
+    """定时提醒触发时由 APScheduler 调用（需通过 REMINDER_JOB_FUNC 字符串引用以支持持久化）。"""
+    global _reminder_bus
+    if _reminder_bus is None:
+        logger.warning("run_scheduled_reminder: _reminder_bus not set, skip")
+        return
+    try:
+        wake_msg = IncomingMessage(
+            channel="system",
+            user_id="system",
+            text=f"[Scheduled Reminder] Please remind user {user_id} on {channel}: {content}. Use send_message tool to deliver.",
+            reply_expected=False,
+            raw={"target_channel": channel, "target_user": user_id},
+        )
+        await _reminder_bus.publish(wake_msg, wait_reply=False)
+    except Exception as e:
+        logger.error(f"Scheduled reminder failed: {e}", exc_info=True)
+
 
 def parse_reminder_time(time_str: str) -> datetime:
     """
@@ -123,37 +153,20 @@ async def scheduler_add(time: str, content: str, user_id: str, channel: str, aut
     
     logger.debug(f"scheduler_add: user_id={user_id}, job_id={job_id}")
     
-    # 获取 bus 引用（用于投递唤醒消息给 Agent）
-    bus = context.get("bus")
-    
-    # 创建异步回调函数
-    async def job_callback(content=None, user_id=None, channel=None, auto_continue=False):
-        try:
-            wake_msg = IncomingMessage(
-                channel="system",
-                user_id="system",
-                text=f"[Scheduled Reminder] Please remind user {user_id} on {channel}: {content}. Use send_message tool to deliver.",
-                reply_expected=False,
-                raw={"target_channel": channel, "target_user": user_id},
-            )
-            await bus.publish(wake_msg, wait_reply=False)
-        except Exception as e:
-            logger.error(f"Scheduled reminder failed: {e}", exc_info=True)
-    
-    # 添加任务到 scheduler，将元数据存储在 kwargs 中
+    # 使用可序列化的函数引用（模块路径字符串），以便 jobstore 持久化后重启可恢复
     try:
         scheduler.add_job(
-            job_callback,
-            'date',
+            REMINDER_JOB_FUNC,
+            "date",
             run_date=run_date,
             id=job_id,
             kwargs={
-                'content': content,
-                'user_id': user_id,
-                'channel': channel,
-                'auto_continue': auto_continue
+                "content": content,
+                "user_id": user_id,
+                "channel": channel,
+                "auto_continue": auto_continue,
             },
-            replace_existing=True
+            replace_existing=True,
         )
         
         # 格式化返回消息

@@ -266,6 +266,16 @@ class CLIClient:
                     data = json.loads(raw)
 
                     if data.get("type") == "reply":
+                        # 附件预览：若有 data/workspace 下的文件，打印可在浏览器打开的 URL
+                        for att in data.get("attachments", []):
+                            rel = None
+                            if "data/workspace/" in att:
+                                rel = att.split("data/workspace/", 1)[-1].lstrip("/").replace("\\", "/")
+                            elif "data\\workspace\\" in att:
+                                rel = att.split("data\\workspace\\", 1)[-1].lstrip("\\").replace("\\", "/")
+                            if rel:
+                                base = f"http://{self.host}:{self.port}"
+                                print(colored(f"Preview: {base}/workspace/{rel}", Colors.CYAN))
                         return data.get("text", "")
                     elif data.get("type") == "error":
                         return colored(f"Error: {data.get('message', '')}", Colors.RED)

@@ -39,6 +39,7 @@ class BaseAgent:
         self.max_context_tokens = llm_config.get("max_context_tokens", 8000)
         self.max_response_tokens = llm_config.get("max_response_tokens")
         self.max_iterations = llm_config.get("max_iterations", 20)
+        self.llm_call_timeout = llm_config.get("llm_call_timeout", 120)
         
         # Provider 特定配置
         self.extra_params = llm_config.get("extra_params", {})
@@ -122,8 +123,9 @@ class BaseAgent:
         else:
             logger.debug(f"上下文 token 数: {total_tokens}/{self.max_context_tokens}")
         
-        # 最大 tool_calls 循环次数（从 config.yaml agent.max_iterations 读取）
-        max_iterations = self.max_iterations
+        # 最大 tool_calls 循环次数
+        # msg_context 可以 override（用于 system/wake 消息限制 iteration 数）
+        max_iterations = (msg_context or {}).get("max_iterations") or self.max_iterations
         iteration = 0
         
         # 构建 LLM 调用参数
@@ -143,21 +145,18 @@ class BaseAgent:
         # 是否需要保留 reasoning_content（DeepSeek Reasoner）
         preserve_reasoning = self.features.get("preserve_reasoning_content", False)
         
-        # 总超时时间（秒）：单次 API 调用最多等这么久（包括 DeepSeek 思考时间）
-        api_call_timeout = 120
-        
         while iteration < max_iterations:
-            # 调用 LLM（带总超时保护）
+            # 调用 LLM（带总超时保护，超时时间来自 config.agent.llm_call_timeout）
             logger.info(f"LLM 调用开始 (iteration={iteration})")
             t0 = time.monotonic()
             try:
                 response = await asyncio.wait_for(
                     self.client.chat.completions.create(**llm_kwargs),
-                    timeout=api_call_timeout
+                    timeout=self.llm_call_timeout
                 )
             except asyncio.TimeoutError:
                 elapsed = time.monotonic() - t0
-                logger.error(f"LLM 调用总超时 ({elapsed:.1f}s > {api_call_timeout}s)")
+                logger.error(f"LLM 调用总超时 ({elapsed:.1f}s > {self.llm_call_timeout}s)")
                 return "抱歉，AI 响应超时，请稍后重试。"
             except Exception as e:
                 elapsed = time.monotonic() - t0
@@ -238,11 +237,19 @@ class BaseAgent:
                 result += f"\n| {name} | {description} | {path} |"
             result += "\n\n使用示例：read_file(\"skills/coding_assistant/SKILL.md\")"
         
+        # 工作区与 state 目录说明（避免被误删）
+        result += "\n\n## 工作区说明"
+        result += "\n- 工作区路径为 data/workspace/，你通过 read_file/create_file 等传入的路径会默认落在此目录下。"
+        result += "\n- **state/ 目录**：用于存储各任务/Agent 的持久化状态（如 state/pm.json 等），不是临时文件。"
+        result += "\n- 当用户要求「清理乱七八糟的文件」「删除临时文件」等时，**不要删除 state/ 下的任何文件**，以免破坏 Skill/任务状态。"
+        
         # 添加世界信息（消息上下文）
         if msg_context:
             result += "\n\n## 当前消息上下文"
             result += f"\n- 来源渠道: {msg_context.get('channel', 'unknown')}"
             result += f"\n- 发送者 ID: {msg_context.get('user_id', 'unknown')}"
+            if msg_context.get('person_id') is not None:
+                result += f"\n- 发送者 person_id: {msg_context.get('person_id')}"
             
             timestamp = msg_context.get('timestamp')
             if timestamp:
@@ -269,6 +276,14 @@ class BaseAgent:
                 result += f"\n\n### {channel.capitalize()} Context (Raw)"
                 for k, v in raw.items():
                     result += f"\n- {k}: {v}"
+
+            # 用户上传的文件（非图片）
+            attachments = msg_context.get("attachments", [])
+            if attachments:
+                result += "\n\n## 用户上传的文件"
+                result += "\n以下文件已保存在工作区，可以用 read_file 读取或 run_command 在沙箱中处理："
+                for path in attachments:
+                    result += f"\n- {path}"
         
         # 添加记忆
         if memories:
@@ -284,39 +299,65 @@ class BaseAgent:
             result += "\n- 如果不指定 channel 和 user_id，默认回复当前对话"
             result += "\n- 指定 channel 和 user_id 可以向其他渠道/用户主动发消息"
 
-        # 通讯录信息（仅在系统唤醒消息时显示，节省 Token）
+        # 通讯录信息
+        # - 普通消息：精简概要（渠道名 + 状态 + guild/chat 数量），节省 token
+        # - 系统唤醒消息：完整详情（具体 channel_id、user_id 等），供主动发消息
         is_system_wake = msg_context.get("channel") == "system" if msg_context else False
         contacts = msg_context.get("contacts", {}) if msg_context else {}
-        if is_system_wake and contacts:
-            result += "\n\n## 通讯录（可联系的渠道和目标）"
-            for ch_name, ch_info in contacts.items():
-                status = ch_info.get("status", "unknown")
-                result += f"\n\n### {ch_name} ({status})"
-                # Guilds (Discord, QQ)
-                for guild_id, guild in ch_info.get("guilds", {}).items():
-                    guild_name = guild.get("name", guild_id)
-                    result += f"\n- Guild: {guild_name} (id: {guild_id})"
-                    for ch_id, ch_data in guild.get("channels", {}).items():
+        if contacts:
+            if is_system_wake:
+                # 完整通讯录
+                result += "\n\n## 通讯录（可联系的渠道和目标）"
+                for ch_name, ch_info in contacts.items():
+                    status = ch_info.get("status", "unknown")
+                    result += f"\n\n### {ch_name} ({status})"
+                    for guild_id, guild in ch_info.get("guilds", {}).items():
+                        guild_name = guild.get("name", guild_id)
+                        result += f"\n- Guild: {guild_name} (id: {guild_id})"
+                        for ch_id, ch_data in guild.get("channels", {}).items():
+                            ch_n = ch_data.get("name", ch_id)
+                            result += f"\n  - #{ch_n} (channel_id: {ch_id})"
+                    for chat_id, chat in ch_info.get("chats", {}).items():
+                        chat_name = chat.get("name", chat_id)
+                        chat_type = chat.get("type", "")
+                        result += f"\n- Chat: {chat_name} ({chat_type}, chat_id: {chat_id})"
+                    for ch_id, ch_data in ch_info.get("channels", {}).items():
                         ch_n = ch_data.get("name", ch_id)
-                        result += f"\n  - #{ch_n} (channel_id: {ch_id})"
-                # Chats (Telegram, Feishu)
-                for chat_id, chat in ch_info.get("chats", {}).items():
-                    chat_name = chat.get("name", chat_id)
-                    chat_type = chat.get("type", "")
-                    result += f"\n- Chat: {chat_name} ({chat_type}, chat_id: {chat_id})"
-                # Channels (Slack)
-                for ch_id, ch_data in ch_info.get("channels", {}).items():
-                    ch_n = ch_data.get("name", ch_id)
-                    ch_type = ch_data.get("type", "")
-                    result += f"\n- #{ch_n} ({ch_type}, channel_id: {ch_id})"
-                # Groups (QQ)
-                for g_id, g_data in ch_info.get("groups", {}).items():
-                    g_name = g_data.get("name", g_id)
-                    result += f"\n- Group: {g_name} (group_openid: {g_id})"
-                # DM Users
-                for uid, u_data in ch_info.get("dm_users", {}).items():
-                    u_name = u_data.get("name", uid)
-                    result += f"\n- DM: {u_name} (user_id: {uid})"
+                        ch_type = ch_data.get("type", "")
+                        result += f"\n- #{ch_n} ({ch_type}, channel_id: {ch_id})"
+                    for g_id, g_data in ch_info.get("groups", {}).items():
+                        g_name = g_data.get("name", g_id)
+                        result += f"\n- Group: {g_name} (group_openid: {g_id})"
+                    for uid, u_data in ch_info.get("dm_users", {}).items():
+                        u_name = u_data.get("name", uid)
+                        result += f"\n- DM: {u_name} (user_id: {uid})"
+            else:
+                # 精简概要（节省 token，但让 Agent 知道有哪些渠道可用）
+                result += "\n\n## 已连接渠道概要"
+                for ch_name, ch_info in contacts.items():
+                    status = ch_info.get("status", "unknown")
+                    parts = [f"{ch_name} ({status})"]
+                    guilds = ch_info.get("guilds", {})
+                    chats = ch_info.get("chats", {})
+                    channels = ch_info.get("channels", {})
+                    groups = ch_info.get("groups", {})
+                    dm_users = ch_info.get("dm_users", {})
+                    details = []
+                    if guilds:
+                        total_ch = sum(len(g.get("channels", {})) for g in guilds.values())
+                        details.append(f"{len(guilds)} guild(s)/{total_ch} channel(s)")
+                    if chats:
+                        details.append(f"{len(chats)} chat(s)")
+                    if channels:
+                        details.append(f"{len(channels)} channel(s)")
+                    if groups:
+                        details.append(f"{len(groups)} group(s)")
+                    if dm_users:
+                        details.append(f"{len(dm_users)} DM user(s)")
+                    if details:
+                        parts.append(", ".join(details))
+                    result += f"\n- {': '.join(parts)}"
+                result += "\n- 使用 send_message 工具可向这些渠道发消息（需要 channel_id/user_id）"
         
         # 添加 NO_REPLY 机制说明
         result += "\n\n## 回复指南"

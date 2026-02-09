@@ -15,6 +15,7 @@ class IncomingMessage:
     text: str                 # 消息文本
     is_group: bool = False    # 是否群聊
     group_id: Optional[str] = None  # 群 ID（群聊时必填）
+    thread_id: Optional[str] = None  # 子会话 ID（如 Slack 的 thread_ts、Discord 的 thread）；有则按 thread 隔离 session，无则按 group
     timestamp: datetime = field(default_factory=datetime.utcnow)
     attachments: list = field(default_factory=list)  # 附件路径（非图片文件）
     images: list[str] = field(default_factory=list)  # 图片路径或 base64 data URL
@@ -26,18 +27,18 @@ class IncomingMessage:
         生成 Session Key（标准化）
         
         Session ID 格式:
-        - 群聊: {channel}:group:{group_id}（按群记录所有消息）
+        - 群聊且带 thread_id: {channel}:group:{group_id}:thread:{thread_id}（同群不同 thread 隔离）
+        - 群聊无 thread_id: {channel}:group:{group_id}（按群，兼容无 thread 概念的 channel）
         - 私聊: {channel}:dm:{user_id}（按用户记录）
         
         设计原则:
-        - Session ID 必须全局唯一（考虑多 channel）
-        - 群聊按群记录，便于获取完整上下文
-        - 私聊按用户记录，保持对话连续性
+        - 有 thread 的 channel（如 Slack）填 thread_id，避免同 channel 下不同 thread 混会话
+        - 无 thread 的 channel 不填 thread_id，保持原行为
         """
         if self.is_group:
-            # 群聊: 按群记录所有消息（去掉 user_id）
+            if self.thread_id:
+                return f"{self.channel}:group:{self.group_id}:thread:{self.thread_id}"
             return f"{self.channel}:group:{self.group_id}"
-        # 私聊: 按用户记录
         return f"{self.channel}:dm:{self.user_id}"
 
 @dataclass
