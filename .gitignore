@@ -30,6 +30,9 @@ venv/
 
 # Data
 data/
+
+# Docs (local only, not in repo)
+docs/
 *.db
 *.sqlite3
 

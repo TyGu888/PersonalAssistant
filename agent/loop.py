@@ -91,6 +91,7 @@ class AgentLoop:
             if not override_cfg.get("enabled", True):
                 skills.pop(skill_name, None)
         
+        self._skills = skills  # 供 run_subagent 按 agent_id 取 skill 的 prompt/tools
         skill_summaries = get_skill_summaries(skills)
         
         # 初始化 DefaultAgent
@@ -130,10 +131,13 @@ class AgentLoop:
         result["max_context_tokens"] = llm_cfg.get("max_context_tokens", 8000)
         result["max_response_tokens"] = llm_cfg.get("max_response_tokens")
         
-        # Agent 行为配置
+        # Agent 行为配置（profile 可覆盖 agent 默认值）
         agent_cfg = self.config.get("agent", {})
         result["max_iterations"] = agent_cfg.get("max_iterations", 20)
-        result["llm_call_timeout"] = agent_cfg.get("llm_call_timeout", 120)
+        profile = profiles.get(active_profile, {}) if active_profile else {}
+        result["llm_call_timeout"] = profile.get("llm_call_timeout") or agent_cfg.get("llm_call_timeout", 120)
+        result["llm_http_timeout"] = profile.get("llm_http_timeout") or profile.get("timeout") or agent_cfg.get("llm_http_timeout") or result["llm_call_timeout"]
+        result["llm_max_retries"] = profile.get("llm_max_retries") or profile.get("max_retries") or agent_cfg.get("llm_max_retries", 2)
         
         return result
     
@@ -333,7 +337,9 @@ class AgentLoop:
             # 注入 channel_manager 供 channel-specific tools 使用 (如 tools/discord.py)
             if self._channel_manager:
                 tool_context["channel_manager"] = self._channel_manager
-            
+            # 注入 agent_loop 供 agent_spawn 等子 Agent 工具使用
+            tool_context["agent_loop"] = self
+
             # 12. 调用 Agent
             response_text = await agent.run(
                 user_text=msg.text,
@@ -375,7 +381,107 @@ class AgentLoop:
         channel_config = channels_config.get(channel, {})
         allowed_users = channel_config.get("allowed_users", [])
         return set(str(uid) for uid in allowed_users)
-    
+
+    async def run_subagent(
+        self,
+        task: str,
+        agent_id: str,
+        parent_session: str,
+        person_id: str,
+        timeout_seconds: int,
+        run_id: str,
+        run_label: str,
+    ) -> tuple[bool, str]:
+        """
+        在当前进程内同步执行子 Agent 任务（不经过 MessageBus）。
+        - agent_id 为 skill 名（如 ppt_assistant）时，使用该 skill 的 prompt 与 tools
+        - 否则使用 default 路由的 tools，无 system_prompt 覆盖
+        返回: (success, result_text 或 error_message)
+        """
+        child_session = f"subagent:{parent_session}:{run_id}"
+        skill = self._skills.get(agent_id) if getattr(self, "_skills", None) else None
+
+        if skill:
+            tool_names = list(skill.tools) if skill.tools else []
+            system_prompt_override = (
+                "[子任务执行]\n你正在作为子 Agent 执行独立任务，完成后直接返回结果。\n\n"
+                + skill.prompt
+            )
+        else:
+            dummy_msg = IncomingMessage(channel="subagent", user_id="sys", text="")
+            default_route = self.router.resolve(dummy_msg)
+            tool_names = list(default_route.tools) if default_route.tools else []
+            system_prompt_override = None
+
+        tools = self.runtime.get_tool_schemas(tool_names)
+        remote_schemas = self.dispatcher.get_remote_tool_schemas()
+        if remote_schemas:
+            for s in remote_schemas:
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": s["name"],
+                        "description": s.get("description", ""),
+                        "parameters": s.get("parameters", {"type": "object", "properties": {}}),
+                    },
+                })
+
+        msg_context = {
+            "user_id": f"subagent:{run_id}",
+            "person_id": person_id,
+            "channel": "subagent",
+            "timestamp": datetime.now(),
+            "is_group": False,
+            "group_id": None,
+            "is_owner": True,
+            "session_id": child_session,
+            "raw": {"parent_session": parent_session, "run_id": run_id, "is_subagent": True},
+            "available_channels": self.dispatcher.list_channels(),
+            "contacts": self._channel_manager.get_contacts_summary() if self._channel_manager else {},
+            "attachments": [],
+        }
+
+        context = await self.runtime.load_context(
+            session_id=child_session,
+            query=task,
+            person_id=person_id,
+            history_limit=0,
+        )
+        tool_context = self.runtime.get_tool_context(person_id, child_session, msg_context)
+        tool_context["dispatcher"] = self.dispatcher
+        if self._scheduler:
+            tool_context["scheduler"] = self._scheduler
+        tool_context["bus"] = self.bus
+        if self._channel_manager:
+            tool_context["channel_manager"] = self._channel_manager
+        tool_context["agent_loop"] = self
+
+        agent = self.agents.get("default")
+        if not agent:
+            return False, "错误: 无 default agent"
+
+        self.runtime.save_message(child_session, "user", task)
+        try:
+            response_text = await asyncio.wait_for(
+                agent.run(
+                    user_text=task,
+                    context=context,
+                    tools=tools,
+                    tool_context=tool_context,
+                    images=None,
+                    msg_context=msg_context,
+                    system_prompt_override=system_prompt_override,
+                ),
+                timeout=timeout_seconds,
+            )
+            self.runtime.save_message(child_session, "assistant", response_text or "")
+            return True, response_text or ""
+        except asyncio.TimeoutError:
+            return False, f"任务超时（{timeout_seconds}秒）"
+        except Exception as e:
+            logger.exception(f"SubAgent {run_id} 执行异常")
+            return False, f"执行失败: {str(e)}"
+
     async def stop(self):
         """停止 AgentLoop"""
         logger.info("Stopping AgentLoop...")

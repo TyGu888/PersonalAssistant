@@ -40,6 +40,8 @@ class BaseAgent:
         self.max_response_tokens = llm_config.get("max_response_tokens")
         self.max_iterations = llm_config.get("max_iterations", 20)
         self.llm_call_timeout = llm_config.get("llm_call_timeout", 120)
+        self.llm_http_timeout = llm_config.get("llm_http_timeout") or self.llm_call_timeout
+        self.llm_max_retries = llm_config.get("llm_max_retries", 2)
         
         # Provider 特定配置
         self.extra_params = llm_config.get("extra_params", {})
@@ -50,9 +52,9 @@ class BaseAgent:
         if llm_config.get("base_url"):
             client_kwargs["base_url"] = llm_config.get("base_url")
         
-        # 超时配置：60 秒超时，自动重试 2 次
-        client_kwargs["timeout"] = 60.0
-        client_kwargs["max_retries"] = 2
+        # 超时与重试：来自 config（agent 或 profile 覆盖）
+        client_kwargs["timeout"] = float(self.llm_http_timeout)
+        client_kwargs["max_retries"] = self.llm_max_retries
         
         self.client = AsyncOpenAI(**client_kwargs)
     
@@ -63,7 +65,8 @@ class BaseAgent:
         tools: list[dict], 
         tool_context: dict = None,
         images: list[str] = None,
-        msg_context: dict = None
+        msg_context: dict = None,
+        system_prompt_override: Optional[str] = None,
     ) -> str:
         """
         运行 Agent 处理用户消息
@@ -103,9 +106,14 @@ class BaseAgent:
            d. 循环直到无 tool_calls 或达到最大循环次数
         5. 返回最终回复
         """
-        # 构建系统消息
+        # 构建系统消息（子 Agent 可传入 system_prompt_override 使用 skill 全文）
         memories = context.get("memories", [])
-        system_content = self._build_system_message(memories, msg_context)
+        if system_prompt_override is not None:
+            system_content = system_prompt_override
+            if memories:
+                system_content += "\n\n## 关于用户的记忆\n" + "\n".join(f"- {m}" for m in memories)
+        else:
+            system_content = self._build_system_message(memories, msg_context)
         
         # 构建消息列表
         history = context.get("history", [])
@@ -361,6 +369,7 @@ class BaseAgent:
         
         # 添加 NO_REPLY 机制说明
         result += "\n\n## 回复指南"
+        result += "当对方用中文提问时，用中文回答，用英文提问时，用英语回答。"
         result += "\n- 当你认为这条消息无需回复时（例如用户只是闲聊的一部分、感谢语、或消息不是针对你的），直接输出 `<NO_REPLY>` 作为完整回复"
         result += "\n- 如果你已经通过工具发送了消息（如 send_message），则不需要再生成文本回复，直接输出 `<NO_REPLY>`"
         result += "\n- 如果需要正常回复，直接输出回复内容即可（不要包含 <NO_REPLY>）"

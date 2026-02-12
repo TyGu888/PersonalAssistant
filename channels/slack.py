@@ -134,10 +134,13 @@ class SlackChannel(BaseChannel, ReconnectMixin):
         # We only want to process: DMs (always) and channel messages (record but don't reply)
         is_group = not is_dm
         
-        thread_ts = event.get("thread_ts") or event.get("ts")
+        # session：仅真正在 thread 内才有 thread_id → channel 顶层用 channel session
+        thread_ts = event.get("thread_ts")  # Slack: 仅当在 thread 内回复时才有 thread_ts
+        # 回复落点：在 channel 里时始终回复到 thread（顶层用本条消息 ts 作 thread 父，避免刷屏）
+        reply_thread_ts = thread_ts or event.get("ts")
         raw = {
             "channel_id": channel_id,
-            "thread_ts": thread_ts,
+            "thread_ts": reply_thread_ts,
             "ts": event.get("ts"),
             "user_id": user_id,
             "team_id": event.get("team"),
@@ -151,7 +154,7 @@ class SlackChannel(BaseChannel, ReconnectMixin):
             text=event.get("text", ""),
             is_group=is_group,
             group_id=channel_id if is_group else None,
-            thread_id=thread_ts if is_group else None,  # 按 thread 隔离 session，同 channel 不同 thread 不混
+            thread_id=thread_ts if is_group else None,  # 仅 thread 内回复时有值 → thread session；顶层无值 → channel session
             reply_expected=is_dm,  # DMs always reply; channel messages only if mentioned
             raw=raw,
         )
@@ -178,10 +181,13 @@ class SlackChannel(BaseChannel, ReconnectMixin):
         import re
         text = re.sub(r'<@[A-Z0-9]+>\s*', '', text).strip()
         
-        thread_ts = event.get("thread_ts") or event.get("ts")
+        # session：仅真正在 thread 内才有 thread_id → channel 顶层 @ 用 channel session
+        thread_ts = event.get("thread_ts")
+        # 回复落点：在 channel 里时始终回复到 thread（顶层用本条消息 ts 作 thread 父）
+        reply_thread_ts = thread_ts or event.get("ts")
         raw = {
             "channel_id": channel_id,
-            "thread_ts": thread_ts,
+            "thread_ts": reply_thread_ts,
             "ts": event.get("ts"),
             "user_id": user_id,
             "team_id": event.get("team"),
@@ -195,7 +201,7 @@ class SlackChannel(BaseChannel, ReconnectMixin):
             text=text,
             is_group=True,
             group_id=channel_id,
-            thread_id=thread_ts,  # 按 thread 隔离 session
+            thread_id=thread_ts,  # 仅 thread 内时有值 → thread session；顶层 @ 无值 → channel session
             reply_expected=True,
             raw=raw,
         )
@@ -274,25 +280,33 @@ class SlackChannel(BaseChannel, ReconnectMixin):
             else:
                 logger.warning(f"No valid target for Slack delivery: {target}")
             
-            # 发送附件
+            # 发送附件（需 Bot 具备 files:write scope，见 docs/slack-setup.md）
             import os
             if deliver_channel:
                 for file_path in (message.attachments or []):
-                    if os.path.exists(file_path):
+                    abs_path = os.path.abspath(file_path)
+                    if os.path.exists(abs_path):
                         try:
-                            await self.client.files_upload_v2(
-                                channel=deliver_channel,
-                                file=file_path,
-                                filename=os.path.basename(file_path)
-                            )
-                            logger.info(f"Delivered Slack attachment: {os.path.basename(file_path)}")
+                            upload_kwargs = {
+                                "channel": deliver_channel,
+                                "file": abs_path,
+                                "filename": os.path.basename(abs_path),
+                            }
+                            if thread_ts:
+                                upload_kwargs["thread_ts"] = thread_ts
+                            await self.client.files_upload_v2(**upload_kwargs)
+                            logger.info(f"Delivered Slack attachment: {os.path.basename(abs_path)}")
                         except Exception as e:
-                            logger.error(f"Failed to send Slack attachment {file_path}: {e}")
+                            logger.error(
+                                f"Failed to send Slack attachment {file_path}: {e}. "
+                                "Ensure Bot has files:write scope (OAuth & Permissions) and reinstall app."
+                            )
                     else:
-                        logger.warning(f"Slack attachment not found: {file_path}")
+                        logger.warning(f"Slack attachment not found: {file_path} (resolved: {abs_path})")
                 
         except Exception as e:
             logger.error(f"Error delivering Slack message: {e}", exc_info=True)
+            raise
     
     async def _cleanup(self):
         """Cleanup connection"""

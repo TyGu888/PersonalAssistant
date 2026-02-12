@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 @registry.register(
     name="send_message",
-    description="向指定渠道发送消息。省略 channel/user_id 时默认回复当前对话（原始频道/线程）。跨渠道发送需指定 channel + channel_id 或 user_id。",
+    description="向指定渠道发送消息。省略 channel/user_id 时默认回复当前对话（原始频道/线程）。跨渠道发送需指定 channel + channel_id 或 user_id。注意：channel_id 和 user_id 必须是真实 ID，请先调用 get_contacts 查询通讯录获取，禁止编造。",
     parameters={
         "type": "object",
         "properties": {
@@ -40,12 +40,17 @@ logger = logging.getLogger(__name__)
             "user_id": {
                 "type": "string",
                 "description": "目标用户 ID（DM 场景）。省略则从当前对话继承"
+            },
+            "attachments": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "可选。要一并发送的文件路径列表（如 data/workspace/xxx.pptx），由渠道上传为附件。部分渠道（如 QQ）不支持附件。"
             }
         },
         "required": ["text"]
     }
 )
-async def send_message(text: str, channel: str = None, channel_id: str = None, user_id: str = None, context=None) -> str:
+async def send_message(text: str, channel: str = None, channel_id: str = None, user_id: str = None, attachments: list = None, context=None) -> str:
     """
     通过 Dispatcher 向指定 Channel 投递消息
     
@@ -80,9 +85,10 @@ async def send_message(text: str, channel: str = None, channel_id: str = None, u
         target["user_id"] = user_id
     
     try:
-        message = OutgoingMessage(text=text)
+        message = OutgoingMessage(text=text, attachments=attachments or [])
         await dispatcher.send_to_channel(channel, target, message)
-        return f"消息已发送到 {channel} (target: channel_id={target.get('channel_id')}, user_id={target.get('user_id')})"
+        extra = f", {len(attachments)} 个附件" if attachments else ""
+        return f"消息已发送到 {channel} (target: channel_id={target.get('channel_id')}, user_id={target.get('user_id')}{extra})"
     except Exception as e:
         logger.error(f"send_message failed: {e}", exc_info=True)
         return f"发送失败: {str(e)}"

@@ -11,7 +11,7 @@
 **Personal Agent Hub** 是一个 Agent-Centric 的个人 AI 助手框架：
 - Agent 是系统核心主体，自主管理记忆和决策
 - Gateway 中心枢纽（FastAPI + WebSocket + MessageBus）
-- 多渠道接入（Discord / Telegram / Slack / 飞书 / QQ / WebSocket CLI Client）
+- 多渠道接入（Discord / Telegram / Slack / 飞书 / QQ / 企业微信 / WebSocket CLI Client）
 - 插件式 Skills 系统（Agent 按需加载 SKILL.md）
 - 可插拔 Tools（定时提醒、文件操作、Shell、网页搜索、MCP、跨渠道消息...）
 - 长期记忆（Session 历史 + RAG 向量搜索 + 跨渠道身份统一）
@@ -148,6 +148,8 @@ AgentLoop
 | **channels/slack.py** | Slack Bot (Socket Mode + AsyncApp) |
 | **channels/feishu.py** | 飞书 Bot (WebSocket + lark.ws.Client) |
 | **channels/qq.py** | QQ Bot (频道/群/C2C, botpy.Client) |
+| **channels/wecom.py** | 企业微信自建应用（HTTP 回调 + access_token，GET/POST /wecom/callback） |
+| **channels/wecom_crypto.py** | 企业微信消息加解密 (WXBizMsgCrypt) |
 | **tools/channel.py** | send_message 工具：Agent 主动向任意 Channel 发消息 |
 | **tools/registry.py** | Tool 注册装饰器，支持本地函数和 MCP 工具 |
 | **tools/shell.py** | Shell 命令 (run_command + 持久化会话) + Docker 沙箱管理 (stop/status/copy) |
@@ -156,6 +158,8 @@ AgentLoop
 | **tools/slack_actions.py** | Slack Thread 回复、反应、置顶 |
 | **tools/feishu_actions.py** | 飞书消息回复、反应、置顶、建群 |
 | **tools/qq_actions.py** | QQ 表情反应、消息置顶 |
+| **tools/wecom_actions.py** | 企业微信回复、群发、上传/下载素材 |
+| **tools/wedrive.py** | 企业微信微盘：空间与文件 CRUD |
 | **cli_client/client.py** | WebSocket CLI 客户端，类 Claude Code 风格 |
 | **worker/agent_worker.py** | Worker 进程，使用 AgentRuntime 替代直接 MemoryManager |
 | **core/types.py** | 共享类型：IncomingMessage, OutgoingMessage, MessageEnvelope |
@@ -212,6 +216,8 @@ async def my_tool(arg1: str, context=None) -> str:
 ### 添加新 Channel
 
 继承 `BaseChannel`，实现 `start()`, `deliver(target, msg)`, `stop()`。使用 `self.publish_message(msg)` 发布到 MessageBus。ChannelManager 自动注入 Bus 和注册 Dispatcher。
+
+**企业微信**：自建应用通过 HTTP 回调接收消息，需公网可访问的 Gateway（或内网穿透）。在管理后台配置「接收消息」回调 URL 为 `https://你的域名/wecom/callback`，并配置 Token、EncodingAESKey。微盘工具需在后台为应用开启「微盘」API 权限。
 
 ---
 
@@ -315,17 +321,17 @@ agent:
 - [x] Skills 插件式加载
 - [x] Token 精确计数与截断
 - [x] FastAPI + WebSocket Gateway
-- [x] 多模态图片处理
-- [x] 持久化 Shell 会话
-- [x] Docker 沙箱执行
-- [x] MCP 协议接入
+- [] 多模态图片处理
+- [] 持久化 Shell 会话
+- [] Docker 沙箱执行
+- [] MCP 协议接入
 - [x] 世界信息传递（channel, user_id, timestamp, is_owner）
 - [x] NO_REPLY 机制
 - [x] Channel Tools（channel_tools 配置自动加载）
-- [x] 跨渠道身份统一（Identity Mapping）
-- [x] 记忆分层（Memory Scope: global + personal）
+- [] 跨渠道身份统一（Identity Mapping）
+- [] 记忆分层（Memory Scope: global + personal）
 - [x] Memory Tools（Agent 主动搜索/添加记忆）
-- [x] Sub-Agent 系统
+- [] Sub-Agent 系统
 - [x] send_message Tool（Agent 主动跨渠道发消息）
 - [x] CLI Client（WebSocket 连接 Gateway）
 - [x] Unified deliver pattern（Dispatcher → channel.deliver）
@@ -355,6 +361,7 @@ agent:
 | LLM 120s/182s 超时 | 已支持 `config.agent.llm_call_timeout`（默认 120）。若仍超时，可适当调大或检查模型侧延迟。 |
 | 同渠道多会话并发 | Slack 已按 thread_id 隔离 session；若多 thread 同时进消息会串行处理。如需严格串行可按 channel+thread 加锁（未实现）。 |
 | Ctrl+C 时 posthog atexit 报错 | 本仓库未依赖 posthog；若出现多为 IDE/环境注入。可在 main 的 signal 处理里忽略 atexit 阶段的 KeyboardInterrupt（按需）。 |
+| PPT 自我审查单次请求极慢（400s+） | 若一次性把多张预览图塞进一次 LLM 请求，请求体巨大，接口会极慢。Skill 已改为「只选 1～3 张关键页」做 Vision 审查；另可把 `agent.llm_call_timeout` 从 600 调低到 180～300，避免单轮等太久。 |
 
 ---
 

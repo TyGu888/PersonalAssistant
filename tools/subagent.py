@@ -1,24 +1,14 @@
 """
-Sub-Agent Tools - 子 Agent 管理工具（已禁用）
+Sub-Agent Tools - 子 Agent 管理工具
 
-TODO: 迁移到新架构
-  - agent_spawn/agent_send 使用旧的 engine.handle() API，在 Agent-Centric 架构中已不存在
-  - 需要改为通过 MessageBus 发布 IncomingMessage 来启动子 Agent
-  - agent_list/agent_history 的数据结构可以复用
-
-原功能:
-- agent_spawn: 生成子 Agent 执行任务
-- agent_list: 列出子 Agent 状态
-- agent_send: 给子 Agent 发消息
-- agent_history: 获取子 Agent 对话历史
+通过 AgentLoop.run_subagent 在当前进程内同步执行子任务，不经过 MessageBus。
+- agent_spawn: 生成子 Agent 执行任务（wait=True 同步等待结果，wait=False 后台运行）
+- agent_list: 列出当前会话的子 Agent 状态
+- agent_send: 暂不支持（子 Agent 为同步执行，无交互通道）
+- agent_history: 获取子 Agent 的对话历史
 """
 
-# All tool registrations in this module are disabled.
-# The module is not imported in tools/__init__.py.
-# To re-enable, migrate agent_spawn to use MessageBus instead of engine.handle().
-
 from tools.registry import registry
-from core.types import IncomingMessage
 import logging
 import uuid
 import asyncio
@@ -152,13 +142,11 @@ async def agent_spawn(
     """
     if not context:
         return "错误: 缺少执行上下文"
-    
-    engine = context.get("engine")
-    if not engine:
-        return "错误: 缺少 engine 引用"
-    
-    # 从 context 获取当前 session 信息
-    # 注意: context 中需要有 msg_context 来获取当前会话信息
+
+    agent_loop = context.get("agent_loop")
+    if not agent_loop:
+        return "错误: 缺少 agent_loop 引用（子 Agent 未启用）"
+
     msg_context = context.get("msg_context", {})
     channel = msg_context.get("channel", "subagent")
     user_id = msg_context.get("user_id", "system")
@@ -181,46 +169,31 @@ async def agent_spawn(
     )
     
     await _subagent_registry.register(run)
-    
-    # 构造子 Agent 的 IncomingMessage
-    # 添加系统提示说明这是子任务
-    sub_task_prompt = f"""[子任务执行模式]
-你正在作为子 Agent 执行一个独立任务。完成后请直接返回结果。
 
-任务: {task}"""
-    
-    sub_message = IncomingMessage(
-        channel="subagent",
-        user_id=f"subagent:{run_id}",
-        text=sub_task_prompt,
-        raw={
-            "parent_session": parent_session,
-            "run_id": run_id,
-            "is_subagent": True
-        }
-    )
-    
     async def execute_subagent():
-        """执行子 Agent 任务"""
+        """执行子 Agent 任务（通过 AgentLoop.run_subagent）"""
         try:
             await _subagent_registry.update_status(run_id, "running")
-            
-            # 调用 engine.handle() 执行任务
-            response = await asyncio.wait_for(
-                engine.handle(sub_message),
-                timeout=timeout_seconds
+            person_id = msg_context.get("person_id", "owner")
+            success, result_text = await agent_loop.run_subagent(
+                task=task,
+                agent_id=agent_id,
+                parent_session=parent_session,
+                person_id=person_id,
+                timeout_seconds=timeout_seconds,
+                run_id=run_id,
+                run_label=run.label,
             )
-            
-            result_text = response.text if response else "无响应"
-            await _subagent_registry.update_status(run_id, "completed", result=result_text)
+            if success:
+                await _subagent_registry.update_status(run_id, "completed", result=result_text)
+                return result_text
+            await _subagent_registry.update_status(run_id, "failed", error=result_text)
             return result_text
-            
         except asyncio.TimeoutError:
             error_msg = f"任务超时（{timeout_seconds}秒）"
             await _subagent_registry.update_status(run_id, "timeout", error=error_msg)
             logger.warning(f"SubAgent {run_id} timed out: {task[:50]}...")
             return error_msg
-            
         except Exception as e:
             error_msg = str(e)
             await _subagent_registry.update_status(run_id, "failed", error=error_msg)
@@ -330,47 +303,14 @@ async def agent_list(context=None) -> str:
 )
 async def agent_send(run_id: str, message: str, context=None) -> str:
     """
-    给子 Agent 发送消息
-    
-    参数:
-    - run_id: 子 Agent 的运行 ID
-    - message: 要发送的消息
-    
-    返回: 子 Agent 的响应
+    给子 Agent 发送消息。当前子 Agent 为同步执行模式，执行结束后即结束，暂不支持中途发送消息。
     """
     if not context:
         return "错误: 缺少执行上下文"
-    
-    engine = context.get("engine")
-    if not engine:
-        return "错误: 缺少 engine 引用"
-    
     run = _subagent_registry.get(run_id)
     if not run:
         return f"错误: 找不到子 Agent run_id={run_id}"
-    
-    if run.status not in ("pending", "running", "completed"):
-        return f"错误: 子 Agent 状态为 {run.status}，无法发送消息"
-    
-    # 构造消息发送给子 Agent 的 session
-    sub_message = IncomingMessage(
-        channel="subagent",
-        user_id=f"subagent:{run_id}",
-        text=message,
-        raw={
-            "parent_session": run.parent_session,
-            "run_id": run_id,
-            "is_subagent": True,
-            "is_followup": True
-        }
-    )
-    
-    try:
-        response = await engine.handle(sub_message)
-        return f"[子 Agent {run_id} 响应]\n{response.text}"
-    except Exception as e:
-        logger.error(f"Failed to send message to SubAgent {run_id}: {e}", exc_info=True)
-        return f"发送失败: {e}"
+    return "当前子 Agent 为同步执行模式，执行完成后即结束，暂不支持 agent_send 中途发送消息。请使用 wait=True 等待结果，或通过 agent_history 查看已完成任务的对话。"
 
 
 @registry.register(

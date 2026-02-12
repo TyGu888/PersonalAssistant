@@ -265,8 +265,8 @@ class Gateway:
         # 1. MCP
         await self._init_mcp_servers()
         
-        # 2. Channels
-        self.channel_manager.init_channels()
+        # 2. Channels (pass server app for WeCom callback routes)
+        self.channel_manager.init_channels(app=self.server.app)
         
         # 3. Scheduler（注入 bus 供持久化 job 回调使用，再启动）
         import tools.scheduler as scheduler_module

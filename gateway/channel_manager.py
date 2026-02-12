@@ -49,8 +49,8 @@ class ChannelManager:
         self._channel_restart_delays: dict[str, float] = {}
         self._shutdown_event = asyncio.Event()
     
-    def init_channels(self):
-        """根据配置初始化所有启用的 Channel"""
+    def init_channels(self, app=None):
+        """根据配置初始化所有启用的 Channel。app: 可选 FastAPI 实例，WeCom 需用于注册回调路由"""
         channels_config = self.config.get("channels", {})
         
         # Telegram
@@ -107,7 +107,22 @@ class ChannelManager:
                 allowed_users=qq_config.get("allowed_users", []),
             )
             self._register_channel("qq", channel)
-        
+
+        # WeCom (企业微信)
+        if channels_config.get("wecom", {}).get("enabled", False):
+            from channels.wecom import WeComChannel
+            wecom_config = channels_config["wecom"]
+            channel = WeComChannel(
+                corp_id=wecom_config.get("corp_id", ""),
+                app_secret=wecom_config.get("app_secret", ""),
+                agent_id=str(wecom_config.get("agent_id", "")),
+                token=wecom_config.get("token", ""),
+                encoding_aes_key=wecom_config.get("encoding_aes_key", ""),
+                allowed_users=wecom_config.get("allowed_users", []),
+                app=app,
+            )
+            self._register_channel("wecom", channel)
+
         logger.info(f"ChannelManager initialized with channels: {list(self.channels.keys())}")
     
     def _register_channel(self, name: str, channel):

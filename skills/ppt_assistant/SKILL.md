@@ -285,7 +285,9 @@ pdftoppm -png -r 200 output.pdf preview/slide
 
 ## 第三步：自我审查
 
-用 `read_file("data/workspace/preview/slide-1.png")` 逐页读取预览图，用 Vision 检查：
+**只选 1～3 张关键页**（如封面、目录、一页正文）用 `read_file` 读入并用 Vision 检查，**不要一次性读入全部预览图**（否则单次请求体积过大，接口会极慢或超时）。例如：`read_file("data/workspace/preview_enhanced/slide-01.png")`、`read_file(".../slide-03.png")`。
+
+检查要点：
 
 - [ ] **布局对齐**：元素是否整齐，间距是否合理
 - [ ] **配色一致**：颜色是否统一，对比度足够
