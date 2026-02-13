@@ -1,6 +1,6 @@
 # Personal Agent Hub - 开发追踪
 
-> 最后更新: 2026-02-07
+> 最后更新: 2026-02-13
 
 快速了解项目架构和开发进展。
 
@@ -13,11 +13,12 @@
 - Gateway 中心枢纽（FastAPI + WebSocket + MessageBus）
 - 多渠道接入（Discord / Telegram / Slack / 飞书 / QQ / 企业微信 / WebSocket CLI Client）
 - 插件式 Skills 系统（Agent 按需加载 SKILL.md）
-- 可插拔 Tools（定时提醒、文件操作、Shell、网页搜索、MCP、跨渠道消息...）
+- 可插拔 Tools（定时提醒、文件操作、Shell、网页搜索、MCP、跨渠道消息、Computer Use...）
 - 长期记忆（Session 历史 + RAG 向量搜索 + 跨渠道身份统一）
 - 进程解耦（Gateway/Agent 分离，Worker 进程池）
 - Docker 沙箱（容器隔离执行）
-- Sub-Agent 系统（生成子 Agent 执行复杂任务）
+- 动态 Sub-Agent 系统（主 Agent 即时定义 prompt/tools/model，前台+后台模式）
+- 运行时热更新（切换 LLM Profile、重载 Skills、动态 MCP 连接）
 
 ---
 
@@ -65,7 +66,14 @@ personal_agent_hub/
 │   ├── sandbox.py             # Docker 沙箱基础设施（DockerSandbox 类，无工具注册）
 │   ├── mcp_client.py          # MCP 协议客户端
 │   ├── memory.py              # 记忆工具（search/add）
-│   └── subagent.py            # Sub-Agent 系统（已禁用，待迁移到 MessageBus）
+│   ├── subagent.py            # 动态 Sub-Agent 系统（agent_spawn/list/query/stop/history）
+│   ├── config_manager.py      # 运行时配置热更新（config_get/set、switch_llm_profile、reload_skills）
+│   ├── mcp_tools.py           # MCP 动态热插拔（mcp_connect/disconnect/list）
+│   ├── computer_use.py        # Computer Use 工具注册（computer_action + 低层 GUI 工具）
+│   └── computer/              # Computer Use 内部模块
+│       ├── actions.py         # ActionBackend（PyAutoGUI/screencapture 封装）
+│       ├── memory.py          # ActionMemory（滑动窗口截图 + 文本动作历史）
+│       └── grounding.py       # GroundingEngine（自主 GUI 任务执行器 + VisionLLM 后端）
 ├── skills/                    # 插件式 Skills（Agent 按需加载）
 │   ├── loader.py              # Skill 加载器 + get_skill_summaries()
 │   ├── study_coach/SKILL.md
@@ -154,12 +162,18 @@ AgentLoop
 | **tools/registry.py** | Tool 注册装饰器，支持本地函数和 MCP 工具 |
 | **tools/shell.py** | Shell 命令 (run_command + 持久化会话) + Docker 沙箱管理 (stop/status/copy) |
 | **tools/sandbox.py** | Docker 沙箱基础设施（DockerSandbox 类），无工具注册，被 shell.py 调用 |
-| **tools/subagent.py** | Sub-Agent 系统（已禁用，待迁移到 MessageBus） |
+| **tools/subagent.py** | 动态 Sub-Agent：agent_spawn（自定义 prompt/tools/model，前台+后台）、agent_list/query/stop/history |
+| **tools/config_manager.py** | 运行时配置热更新：config_get/set、switch_llm_profile、reload_skills |
+| **tools/mcp_tools.py** | MCP 动态热插拔：mcp_connect/disconnect/list（运行时连接/断开 MCP Server） |
 | **tools/slack_actions.py** | Slack Thread 回复、反应、置顶 |
 | **tools/feishu_actions.py** | 飞书消息回复、反应、置顶、建群 |
 | **tools/qq_actions.py** | QQ 表情反应、消息置顶 |
 | **tools/wecom_actions.py** | 企业微信回复、群发、上传/下载素材 |
 | **tools/wedrive.py** | 企业微信微盘：空间与文件 CRUD |
+| **tools/computer_use.py** | Computer Use 工具注册：computer_action（高层 GUI 任务）+ screenshot/gui_click/gui_type/gui_hotkey/gui_scroll（低层） |
+| **tools/computer/grounding.py** | GroundingEngine：自主 GUI 任务执行器，VisionAPIBackend 可插拔（默认 Qwen3VL） |
+| **tools/computer/actions.py** | ActionBackend：PyAutoGUI + screencapture 封装（点击/输入/快捷键/滚动/截图） |
+| **tools/computer/memory.py** | ActionMemory：滑动窗口截图 + 文本动作历史 + 关键快照 + 经验记录 |
 | **cli_client/client.py** | WebSocket CLI 客户端，类 Claude Code 风格 |
 | **worker/agent_worker.py** | Worker 进程，使用 AgentRuntime 替代直接 MemoryManager |
 | **core/types.py** | 共享类型：IncomingMessage, OutgoingMessage, MessageEnvelope |
@@ -275,6 +289,11 @@ agent:
    - 提醒/定时 → scheduler_add/list/cancel
    - 跨渠道发消息 → send_message Tool
    - 项目管理 → DefaultAgent 加载 project_manager Skill
+   - GUI 操作 → computer_action（需 pyautogui + Accessibility 权限）
+   - 子任务 → agent_spawn（前台/后台），agent_list/query/stop
+   - 切换模型 → switch_llm_profile
+   - 热加载 Skill → reload_skills
+   - 动态 MCP → mcp_connect/disconnect/list
 
 ### 路由规则
 
@@ -294,9 +313,8 @@ agent:
 |------|------|------|
 | **Gateway** | app, bus, dispatcher, channel_manager, server | ✅ |
 | **Agent** | loop, runtime, base, default | ✅ |
-| **Channels** | Telegram, Discord, Slack, Feishu, QQ | ✅ |
-| **Tools** | registry, channel, scheduler (含 SQLite 持久化), filesystem, shell (含沙箱管理), web, image, browser (Playwright), sandbox (基础设施), mcp_client, memory | ✅ |
-| **Tools (禁用)** | subagent（待迁移到 MessageBus） | ⏸️ |
+| **Channels** | Telegram, Discord, Slack, Feishu, QQ, WeCom (企业微信) | ✅ |
+| **Tools** | registry, channel, scheduler (含 SQLite 持久化), filesystem, shell (含沙箱管理), web, image, browser (Playwright), sandbox (基础设施), mcp_client, memory, wecom_actions, wedrive, computer_use (GUI 操作), subagent (动态 Sub-Agent), config_manager (配置热更新), mcp_tools (MCP 热插拔) | ✅ |
 | **Memory** | session, global_mem (scope + person_id), manager (Token 截断 + Identity Mapping) | ✅ |
 | **Skills** | loader (插件式), study_coach, coding_assistant, project_manager | ✅ |
 | **Worker** | agent_worker (使用 AgentRuntime), agent_client, pool, protocol | ✅ |
@@ -331,7 +349,10 @@ agent:
 - [] 跨渠道身份统一（Identity Mapping）
 - [] 记忆分层（Memory Scope: global + personal）
 - [x] Memory Tools（Agent 主动搜索/添加记忆）
-- [] Sub-Agent 系统
+- [x] Sub-Agent 系统（动态 spawn，自定义 prompt/tools/model，前台+后台模式）
+- [x] 运行时配置热更新（switch_llm_profile、reload_skills、config_get/set）
+- [x] MCP 动态热插拔（mcp_connect/disconnect/list）
+- [] Computer Use（GUI 操作：computer_action + 低层工具）
 - [x] send_message Tool（Agent 主动跨渠道发消息）
 - [x] CLI Client（WebSocket 连接 Gateway）
 - [x] Unified deliver pattern（Dispatcher → channel.deliver）
@@ -351,8 +372,21 @@ agent:
 - [ ] Slack Channel 完整对话测试
 - [ ] 飞书 Channel 完整对话测试
 - [ ] QQ Channel 完整对话测试（频道/群/C2C）
+- [ ] WeCom Channel 回调验证（/wecom/callback GET 验签 + POST 消息）
+- [ ] WeCom Channel 单聊/群聊 deliver 测试
+- [ ] WeDrive 微盘工具测试（需后台开启微盘 API 权限）
 - [ ] Contact Registry 启动扫描验证
 - [ ] 周期性唤醒通讯录可见性验证
+- [ ] Computer Use: computer_action 完整 GUI 任务执行（需 pyautogui + Accessibility 权限）
+- [ ] Computer Use: screenshot / gui_click / gui_type 低层工具
+- [ ] Computer Use: Qwen3VL Vision API 定位精度验证
+- [ ] Sub-Agent: agent_spawn 前台模式完整执行（含 tool 调用）
+- [ ] Sub-Agent: agent_spawn background=true + agent_query/agent_stop 生命周期
+- [ ] Sub-Agent: 使用不同 llm_profile 的子 Agent（如 deepseek_chat）
+- [ ] Config: switch_llm_profile 切换后对话正常
+- [ ] Config: reload_skills 修改 SKILL.md 后立即生效
+- [ ] MCP: mcp_connect 连接外部 MCP Server 并发现工具
+- [ ] MCP: mcp_disconnect 断开后工具不再可用
 
 ### 运行中已知问题（可选优化）
 
@@ -369,6 +403,9 @@ agent:
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-02-13 | **自适应框架演进：动态 Sub-Agent + 配置热更新 + MCP 热插拔**。(1) Sub-Agent 全面重写：主 Agent 即时定义 prompt/tools/model（不再依赖预定义 Skill），前台（阻塞）+ 后台（异步）模式，支持不同 LLM Profile，生命周期管理（agent_query/agent_stop）。(2) 运行时配置热更新：config_get/set（dot-path 读写）、switch_llm_profile（切换模型并重建 Agent）、reload_skills（重新扫描 SKILL.md 并更新 Agent）。(3) MCP 动态热插拔：mcp_connect/disconnect/list，Agent 可在对话中连接新 MCP Server 获得新能力。清理旧 run_subagent 死代码。 |
+| 2026-02-10 | **Computer Use (GUI 操作)**。Hierarchical ReAct 架构：主 Agent 发出高层 `computer_action` 指令，GroundingEngine 自主完成全部 GUI 子步骤（截图→VisionLLM 规划定位→PyAutoGUI 执行→验证）。6 个工具：computer_action（高层）+ screenshot/gui_click/gui_type/gui_hotkey/gui_scroll（低层）。Vision 后端可插拔（BaseVisionBackend，当前 VisionAPIBackend 默认 Qwen3VL，切换模型只改 config）。ActionMemory 四层记忆。依赖 pyautogui + pyperclip。设计文档：docs/ui-use-design.md。 |
+| 2026-02-09 | **WeCom (企业微信) Channel + WeDrive 微盘**。自建应用回调模式接入（HTTP GET/POST /wecom/callback，AES 加解密）；access_token 自动刷新；单聊/群聊收发消息 + 附件上传；wecom_actions 工具（回复/群发/素材上传下载）；wedrive 微盘工具集（空间列表/创建/重命名、文件列表/上传/下载/删除/移动/重命名）；依赖 pycryptodome。 |
 | 2026-02-07 | **Scheduler 持久化 + Browser 工具**。定时提醒使用 SQLite jobstore（data/scheduler.db），重启后任务保留；回调改为模块级 `run_scheduled_reminder` 以支持序列化。新增 browser_*（Playwright）：browser_open/goto/click/fill/snapshot/close，需 `playwright install chromium`。 |
 | 2026-02-07 | **Tool 清理 + Wake 机制修复**。禁用 subagent 工具（待迁移 MessageBus）；sandbox 工具合并到 shell.py（移除冗余 sandbox_exec/sandbox_start，sandbox.py 保留为纯基础设施）；修复周期性唤醒：不加载对话历史（防污染）、保留 memories、限制 max_iterations=3、跳过并发 wake、通讯录概要注入普通对话 |
 | 2026-02-07 | **新增 Slack/飞书/QQ Channel + Contact Registry**。三个新渠道完整接入（收发消息、deliver 模式、平台特有操作工具）；Contact Registry 通讯录系统（启动扫描 + 懒积累 + 唤醒时注入 system prompt）|
@@ -429,6 +466,8 @@ fastapi>=0.100.0
 uvicorn>=0.23.0
 websockets>=12.0
 docker>=6.0.0
+pyautogui>=0.9.54
+pyperclip>=1.8.0
 ```
 
 ---
@@ -451,15 +490,15 @@ docker>=6.0.0
 
 | 方向 | 说明 |
 |------|------|
-| 动态 Prompt | 根据任务类型、用户历史动态生成 prompt |
-| 插件系统 | Channel/Tool 作为独立包动态加载 |
+| 动态 Prompt | 根据任务类型、用户历史动态生成 prompt（部分已实现：sub-agent 自定义 prompt） |
+| 插件系统 | Channel/Tool 作为独立包动态加载（部分已实现：MCP 动态热插拔） |
 | Web 前端 | 管理界面 + 对话 UI |
-mac，ios，window，linux系统的系统工具？以及可能的截图，点击操作？
+Computer Use 增强：ShowUI 本地模型、Set-of-Mark 标注、macOS Accessibility、经验学习
 
 ### 长期
 
 | 方向 | 说明 |
 |------|------|
-| Multi-Agent | 多 Agent 协作（Planner → Coder → Reviewer） |
+| Multi-Agent | 多 Agent 协作（Planner → Coder → Reviewer）（基础已实现：动态 spawn_agent） |
 | 分布式部署 | Gateway 云端 + Agent 本地 |
 | 图记忆 | Knowledge Graph 增强记忆系统 |

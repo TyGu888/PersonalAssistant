@@ -29,6 +29,13 @@ llm_profiles:
     base_url: https://api.openai.com/v1
     model: gpt-4o
 
+  # Qwen3 VL (Vision Language Model, 用于 Computer Use grounding)
+  # 通过 Dashscope OpenAI-compatible API 或火山引擎等
+  qwen3_vl:
+    api_key: ${DASHSCOPE_API_KEY}
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen-vl-max
+
 # 当前使用的 LLM Profile
 llm:
   active: ark_doubao  # 切换这里即可换模型
@@ -150,15 +157,33 @@ routing:
       # 记忆
       memory_search, memory_add,
       # Sub-Agent
-      agent_spawn, agent_list, agent_send, agent_history,
+      agent_spawn, agent_list, agent_send, agent_history, agent_query, agent_stop,
+      # Config 热更新
+      config_get, config_set, switch_llm_profile, reload_skills,
+      # MCP 动态热插拔
+      mcp_connect, mcp_disconnect, mcp_list,
       # Channel (主动发消息 + 通讯录)
-      send_message, get_contacts, contact_remove
+      send_message, get_contacts, contact_remove,
       # 企业微信 + 微盘
       wecom_reply_message, wecom_send_to_group, wecom_upload_media, wecom_download_media,
       wedrive_list_spaces, wedrive_space_info, wedrive_create_space, wedrive_rename_space,
       wedrive_list_files, wedrive_file_info, wedrive_create_folder, wedrive_upload_file,
-      wedrive_download_file, wedrive_delete_file, wedrive_move_file, wedrive_rename_file
+      wedrive_download_file, wedrive_delete_file, wedrive_move_file, wedrive_rename_file,
+      # Computer Use (GUI 操作)
+      computer_action, screenshot, gui_click, gui_type, gui_hotkey, gui_scroll
     ]
+
+# Computer Use 配置 (GUI 操作)
+computer_use:
+  enabled: false                   # 默认关闭，启用前需安装 pyautogui
+  vision_profile: qwen3_vl        # 指向 llm_profiles 中的 VL 模型，切换模型只改这里
+  vision_backend: vision_api       # 目前支持: vision_api (未来: showui, accessibility)
+  max_steps: 15                    # computer_action 默认最大步数
+  screenshot_dir: /tmp/agent_screenshots
+  action_wait: 0.3                 # 每步操作后等待 UI 更新的时间 (秒)
+  memory:
+    max_screenshots: 2             # 滑动窗口截图数量
+    max_text_history: 50           # 文本动作历史最大条数
 
 # Docker 沙箱配置
 sandbox:

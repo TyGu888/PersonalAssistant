@@ -38,6 +38,9 @@ import tools.image
 import tools.subagent
 import tools.channel
 import tools.discord_actions
+import tools.computer_use
+import tools.config_manager
+import tools.mcp_tools
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +264,13 @@ class Gateway:
         """
         # 0. Sandbox 镜像
         await self._ensure_sandbox_image()
+        
+        # 0.5. Computer Use
+        try:
+            from tools.computer_use import init_computer_use
+            init_computer_use(self.config)
+        except Exception as e:
+            logger.warning(f"Computer Use init skipped: {e}")
         
         # 1. MCP
         await self._init_mcp_servers()

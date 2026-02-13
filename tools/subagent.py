@@ -1,11 +1,16 @@
 """
-Sub-Agent Tools - 子 Agent 管理工具
+Sub-Agent Tools - Dynamically spawn and manage sub-agents
 
-通过 AgentLoop.run_subagent 在当前进程内同步执行子任务，不经过 MessageBus。
-- agent_spawn: 生成子 Agent 执行任务（wait=True 同步等待结果，wait=False 后台运行）
-- agent_list: 列出当前会话的子 Agent 状态
-- agent_send: 暂不支持（子 Agent 为同步执行，无交互通道）
-- agent_history: 获取子 Agent 的对话历史
+The main Agent defines everything about a sub-agent at spawn time:
+prompt, tools, model (llm_profile), max_iterations, timeout, etc.
+
+Tools:
+- agent_spawn:   Spawn a sub-agent (foreground blocking or background async)
+- agent_list:    List sub-agents for the current session
+- agent_query:   Get detailed status / result of a specific sub-agent
+- agent_send:    Send a message to a running sub-agent (note: autonomous, no mid-exec injection)
+- agent_stop:    Cancel a running background sub-agent
+- agent_history: Read a sub-agent's conversation history from memory
 """
 
 from tools.registry import registry
@@ -13,25 +18,27 @@ import logging
 import uuid
 import asyncio
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
 
-# ===== 数据结构 =====
+# ===== Data structures =====
 
 @dataclass
 class SubAgentRun:
-    """子 Agent 运行实例"""
+    """A single sub-agent execution record."""
     run_id: str
     parent_session: str
     child_session: str
     task: str
     label: str
-    agent_id: str
-    status: str  # "pending" | "running" | "completed" | "failed" | "timeout"
+    status: str  # "pending" | "running" | "completed" | "failed" | "timeout" | "cancelled"
     created_at: datetime
+    prompt: str                          # system prompt used
+    tools: list[str]                     # tool names used
+    llm_profile: Optional[str] = None   # profile used (None = main agent's)
     completed_at: Optional[datetime] = None
     result: Optional[str] = None
     error: Optional[str] = None
@@ -39,346 +46,572 @@ class SubAgentRun:
 
 
 class SubAgentRegistry:
-    """子 Agent 注册表"""
-    
+    """Thread-safe registry of sub-agent runs (asyncio.Lock)."""
+
     def __init__(self):
         self._runs: Dict[str, SubAgentRun] = {}
         self._lock = asyncio.Lock()
-    
+
     async def register(self, run: SubAgentRun):
-        """注册子 Agent 运行"""
         async with self._lock:
             self._runs[run.run_id] = run
-    
+
     def get(self, run_id: str) -> Optional[SubAgentRun]:
-        """获取子 Agent 运行信息"""
         return self._runs.get(run_id)
-    
+
     def list_by_parent(self, parent_session: str) -> list[SubAgentRun]:
-        """列出指定父 session 的所有子 Agent"""
         return [r for r in self._runs.values() if r.parent_session == parent_session]
-    
+
     async def update_status(
-        self, 
-        run_id: str, 
-        status: str, 
-        result: str = None, 
-        error: str = None
+        self,
+        run_id: str,
+        status: str,
+        result: str = None,
+        error: str = None,
     ):
-        """更新子 Agent 状态"""
         async with self._lock:
-            if run_id in self._runs:
-                run = self._runs[run_id]
-                run.status = status
+            run = self._runs.get(run_id)
+            if not run:
+                return
+            run.status = status
+            if status in ("completed", "failed", "timeout", "cancelled"):
                 run.completed_at = datetime.now()
-                if result is not None:
-                    run.result = result
-                if error is not None:
-                    run.error = error
+            if result is not None:
+                run.result = result
+            if error is not None:
+                run.error = error
+
+    async def stop(self, run_id: str) -> Optional[str]:
+        """Cancel a running background sub-agent. Returns error string or None."""
+        async with self._lock:
+            run = self._runs.get(run_id)
+            if not run:
+                return f"Sub-agent run_id={run_id} not found"
+            if run.status != "running":
+                return f"Sub-agent {run_id} is not running (status={run.status})"
+            if run._task is None or run._task.done():
+                return f"Sub-agent {run_id} has no active asyncio task"
+            run._task.cancel()
+            run.status = "cancelled"
+            run.completed_at = datetime.now()
+            run.error = "Cancelled by user"
+            return None
 
 
-# 全局注册表
-_subagent_registry = SubAgentRegistry()
+# Global registry
+_registry = SubAgentRegistry()
 
 
-# ===== Tool 实现 =====
+# ===== Helpers =====
+
+def _get_default_tool_names(agent_loop) -> list[str]:
+    """Resolve the default route's tool names (same tools the main agent would get)."""
+    from core.types import IncomingMessage
+    dummy = IncomingMessage(channel="subagent", user_id="sys", text="")
+    route = agent_loop.router.resolve(dummy)
+    return list(route.tools) if route.tools else []
+
+
+def _build_llm_config(agent_loop, profile_name: str, max_iterations: int) -> dict:
+    """Build an llm_config dict from a named profile."""
+    profiles = agent_loop.config.get("llm_profiles", {})
+    profile = profiles[profile_name]
+    llm_cfg = agent_loop.config.get("llm", {})
+    agent_cfg = agent_loop.config.get("agent", {})
+
+    return {
+        "api_key": profile.get("api_key"),
+        "base_url": profile.get("base_url"),
+        "model": profile.get("model", "gpt-4o"),
+        "extra_params": profile.get("extra_params", {}),
+        "features": profile.get("features", {}),
+        "max_context_tokens": llm_cfg.get("max_context_tokens", 8000),
+        "max_response_tokens": llm_cfg.get("max_response_tokens"),
+        "max_iterations": max_iterations,
+        "llm_call_timeout": profile.get("llm_call_timeout") or agent_cfg.get("llm_call_timeout", 120),
+        "llm_http_timeout": (
+            profile.get("llm_http_timeout")
+            or profile.get("timeout")
+            or agent_cfg.get("llm_http_timeout")
+            or profile.get("llm_call_timeout")
+            or agent_cfg.get("llm_call_timeout", 120)
+        ),
+        "llm_max_retries": profile.get("llm_max_retries") or agent_cfg.get("llm_max_retries", 2),
+    }
+
+
+def _build_tool_context(agent_loop, person_id: str, child_session: str, msg_context: dict) -> dict:
+    """Build tool_context the same way AgentLoop._handle_envelope does."""
+    tool_context = agent_loop.runtime.get_tool_context(person_id, child_session, msg_context)
+    tool_context["dispatcher"] = agent_loop.dispatcher
+    if agent_loop._scheduler:
+        tool_context["scheduler"] = agent_loop._scheduler
+    tool_context["bus"] = agent_loop.bus
+    if agent_loop._channel_manager:
+        tool_context["channel_manager"] = agent_loop._channel_manager
+    tool_context["agent_loop"] = agent_loop
+    return tool_context
+
+
+# ===== Tools =====
 
 @registry.register(
     name="agent_spawn",
-    description="生成子 Agent 执行复杂任务。子 Agent 独立运行，完成后会报告结果。适用于需要长时间执行或独立思考的任务。",
+    description=(
+        "Spawn a sub-agent to execute a task. "
+        "The sub-agent gets its own session, prompt, tools, and optionally a different LLM profile. "
+        "Use background=true for long tasks; use foreground (default) when you need the result immediately."
+    ),
     parameters={
         "type": "object",
         "properties": {
             "task": {
-                "type": "string", 
-                "description": "任务描述（会作为消息发送给子 Agent）"
+                "type": "string",
+                "description": "Task description sent as the user message to the sub-agent",
             },
-            "label": {
-                "type": "string", 
-                "description": "任务标签（便于追踪）",
-                "default": ""
+            "prompt": {
+                "type": "string",
+                "description": "System prompt for the sub-agent. If omitted, a default sub-task prompt is used.",
             },
-            "agent_id": {
-                "type": "string", 
-                "description": "使用哪个 Agent 模板",
-                "default": "default"
+            "tools": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Tool names the sub-agent can use. If omitted, uses the default route's tools.",
+            },
+            "llm_profile": {
+                "type": "string",
+                "description": "LLM profile name from config.llm_profiles. If omitted, uses the main agent's active profile.",
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": "Max tool-call iterations for the sub-agent",
+                "default": 30,
             },
             "timeout_seconds": {
-                "type": "integer", 
-                "description": "超时时间（秒）",
-                "default": 300
+                "type": "integer",
+                "description": "Timeout in seconds",
+                "default": 300,
             },
-            "wait": {
-                "type": "boolean", 
-                "description": "是否等待完成（True=同步等待结果，False=后台运行）",
-                "default": False
-            }
+            "background": {
+                "type": "boolean",
+                "description": "If true, run in background and return run_id immediately",
+                "default": False,
+            },
+            "label": {
+                "type": "string",
+                "description": "Human-readable label for tracking",
+            },
         },
-        "required": ["task"]
-    }
+        "required": ["task"],
+    },
 )
 async def agent_spawn(
-    task: str, 
-    label: str = "", 
-    agent_id: str = "default",
-    timeout_seconds: int = 300, 
-    wait: bool = False, 
-    context=None
+    task: str,
+    prompt: str = None,
+    tools: list[str] = None,
+    llm_profile: str = None,
+    max_iterations: int = 30,
+    timeout_seconds: int = 300,
+    background: bool = False,
+    label: str = None,
+    context=None,
 ) -> str:
-    """
-    生成子 Agent 执行任务
-    
-    参数:
-    - task: 任务描述
-    - label: 任务标签（可选）
-    - agent_id: Agent 模板 ID
-    - timeout_seconds: 超时时间
-    - wait: 是否同步等待结果
-    - context: 执行上下文（由 Engine 注入）
-    
-    返回:
-    - wait=True: 返回任务执行结果
-    - wait=False: 返回 run_id，可用于后续查询
-    """
     if not context:
-        return "错误: 缺少执行上下文"
+        return "Error: missing execution context"
 
     agent_loop = context.get("agent_loop")
     if not agent_loop:
-        return "错误: 缺少 agent_loop 引用（子 Agent 未启用）"
+        return "Error: agent_loop not available (sub-agent system not enabled)"
 
     msg_context = context.get("msg_context", {})
-    channel = msg_context.get("channel", "subagent")
-    user_id = msg_context.get("user_id", "system")
-    parent_session = msg_context.get("session_id", f"{channel}:dm:{user_id}")
-    
-    # 生成子 session_id
+    parent_session = msg_context.get("session_id", "unknown")
+    person_id = msg_context.get("person_id", "owner")
+
+    # Generate unique run_id
     run_id = str(uuid.uuid4())[:8]
     child_session = f"subagent:{parent_session}:{run_id}"
-    
-    # 创建 SubAgentRun
+
+    # Effective system prompt
+    effective_prompt = prompt or (
+        f"[Sub-task] You are executing an independent sub-task. "
+        f"Return results directly when done.\n\nTask: {task}"
+    )
+
+    # Effective tool names
+    tool_names = list(tools) if tools else _get_default_tool_names(agent_loop)
+
+    # Determine active profile
+    llm_cfg = agent_loop.config.get("llm", {})
+    active_profile = llm_cfg.get("active")
+    use_separate_agent = llm_profile and llm_profile != active_profile
+
+    # Validate llm_profile if specified
+    if use_separate_agent:
+        profiles = agent_loop.config.get("llm_profiles", {})
+        if llm_profile not in profiles:
+            return f"Error: LLM profile '{llm_profile}' not found. Available: {list(profiles.keys())}"
+
+    # Register the run
     run = SubAgentRun(
         run_id=run_id,
         parent_session=parent_session,
         child_session=child_session,
         task=task,
         label=label or f"task-{run_id}",
-        agent_id=agent_id,
         status="pending",
-        created_at=datetime.now()
+        created_at=datetime.now(),
+        prompt=effective_prompt,
+        tools=tool_names,
+        llm_profile=llm_profile,
     )
-    
-    await _subagent_registry.register(run)
+    await _registry.register(run)
 
-    async def execute_subagent():
-        """执行子 Agent 任务（通过 AgentLoop.run_subagent）"""
+    async def _execute():
+        """Run the sub-agent to completion."""
         try:
-            await _subagent_registry.update_status(run_id, "running")
-            person_id = msg_context.get("person_id", "owner")
-            success, result_text = await agent_loop.run_subagent(
-                task=task,
-                agent_id=agent_id,
-                parent_session=parent_session,
+            await _registry.update_status(run_id, "running")
+
+            # Build agent instance
+            # Import here to avoid circular import at module level
+            from agent.base import BaseAgent
+
+            if use_separate_agent:
+                agent_llm_config = _build_llm_config(agent_loop, llm_profile, max_iterations)
+                agent = BaseAgent(
+                    agent_id=f"subagent-{run_id}",
+                    system_prompt=effective_prompt,
+                    llm_config=agent_llm_config,
+                )
+            else:
+                agent = agent_loop.agents.get("default")
+                if not agent:
+                    raise RuntimeError("No default agent available")
+
+            # Build msg_context for the child session
+            child_msg_context = {
+                "user_id": msg_context.get("user_id", "system"),
+                "person_id": person_id,
+                "channel": "subagent",
+                "timestamp": datetime.now(),
+                "is_group": False,
+                "group_id": None,
+                "is_owner": True,
+                "session_id": child_session,
+                "raw": {
+                    "parent_session": parent_session,
+                    "run_id": run_id,
+                    "is_subagent": True,
+                },
+                "available_channels": agent_loop.dispatcher.list_channels(),
+                "contacts": (
+                    agent_loop._channel_manager.get_contacts_summary()
+                    if agent_loop._channel_manager
+                    else {}
+                ),
+                "attachments": [],
+            }
+
+            # Load context (fresh session, no history)
+            ctx = await agent_loop.runtime.load_context(
+                session_id=child_session,
+                query=task,
                 person_id=person_id,
-                timeout_seconds=timeout_seconds,
-                run_id=run_id,
-                run_label=run.label,
+                history_limit=0,
             )
-            if success:
-                await _subagent_registry.update_status(run_id, "completed", result=result_text)
-                return result_text
-            await _subagent_registry.update_status(run_id, "failed", error=result_text)
-            return result_text
+
+            # Tool schemas
+            tools_schemas = agent_loop.runtime.get_tool_schemas(tool_names)
+
+            # Tool context
+            tool_context = _build_tool_context(agent_loop, person_id, child_session, child_msg_context)
+
+            # Save the user message to the child session
+            agent_loop.runtime.save_message(child_session, "user", task)
+
+            # Run the agent
+            run_kwargs = dict(
+                user_text=task,
+                context=ctx,
+                tools=tools_schemas,
+                tool_context=tool_context,
+                msg_context=child_msg_context,
+            )
+            if use_separate_agent:
+                # Separate BaseAgent already has the system prompt baked in
+                response = await asyncio.wait_for(
+                    agent.run(**run_kwargs),
+                    timeout=timeout_seconds,
+                )
+            else:
+                # Reuse default agent, override system prompt
+                response = await asyncio.wait_for(
+                    agent.run(**run_kwargs, system_prompt_override=effective_prompt),
+                    timeout=timeout_seconds,
+                )
+
+            # Save the assistant response
+            agent_loop.runtime.save_message(child_session, "assistant", response or "")
+
+            await _registry.update_status(run_id, "completed", result=response or "")
+            return response or ""
+
         except asyncio.TimeoutError:
-            error_msg = f"任务超时（{timeout_seconds}秒）"
-            await _subagent_registry.update_status(run_id, "timeout", error=error_msg)
-            logger.warning(f"SubAgent {run_id} timed out: {task[:50]}...")
+            error_msg = f"Timed out after {timeout_seconds}s"
+            await _registry.update_status(run_id, "timeout", error=error_msg)
+            logger.warning(f"SubAgent {run_id} timed out: {task[:80]}...")
             return error_msg
+
+        except asyncio.CancelledError:
+            await _registry.update_status(run_id, "cancelled", error="Cancelled")
+            logger.info(f"SubAgent {run_id} cancelled")
+            return "Cancelled"
+
         except Exception as e:
             error_msg = str(e)
-            await _subagent_registry.update_status(run_id, "failed", error=error_msg)
+            await _registry.update_status(run_id, "failed", error=error_msg)
             logger.error(f"SubAgent {run_id} failed: {e}", exc_info=True)
-            return f"执行失败: {error_msg}"
-    
-    if wait:
-        # 同步等待结果
-        result = await execute_subagent()
-        return f"[子任务完成] run_id={run_id}\n\n{result}"
-    else:
-        # 后台运行
-        task_obj = asyncio.create_task(execute_subagent())
+            return f"Execution failed: {error_msg}"
+
+    if background:
+        task_obj = asyncio.create_task(_execute(), name=f"subagent-{run_id}")
         run._task = task_obj
-        logger.info(f"SubAgent spawned: run_id={run_id}, task={task[:50]}...")
-        return f"子 Agent 已启动: run_id={run_id}, label={run.label}\n使用 agent_list 查看状态，agent_history 获取结果。"
+        logger.info(f"SubAgent spawned (background): run_id={run_id}, task={task[:80]}...")
+        return (
+            f"Sub-agent started in background.\n"
+            f"  run_id: {run_id}\n"
+            f"  label:  {run.label}\n"
+            f"Use agent_query(run_id=\"{run_id}\") to check progress, "
+            f"agent_stop(run_id=\"{run_id}\") to cancel."
+        )
+    else:
+        result = await _execute()
+        return f"[Sub-task completed] run_id={run_id}\n\n{result}"
 
 
 @registry.register(
     name="agent_list",
-    description="列出当前会话的子 Agent 状态",
+    description="List all sub-agents spawned in the current session, with status and result summaries.",
     parameters={
         "type": "object",
         "properties": {},
-        "required": []
-    }
+        "required": [],
+    },
 )
 async def agent_list(context=None) -> str:
-    """
-    列出当前会话的所有子 Agent 状态
-    
-    返回格式化的状态列表
-    """
     if not context:
-        return "错误: 缺少执行上下文"
-    
+        return "Error: missing execution context"
+
     msg_context = context.get("msg_context", {})
-    channel = msg_context.get("channel", "subagent")
-    user_id = msg_context.get("user_id", "system")
-    parent_session = msg_context.get("session_id", f"{channel}:dm:{user_id}")
-    
-    runs = _subagent_registry.list_by_parent(parent_session)
-    
+    parent_session = msg_context.get("session_id", "unknown")
+
+    runs = _registry.list_by_parent(parent_session)
     if not runs:
-        return "当前没有子 Agent 任务。"
-    
-    # 按创建时间排序
+        return "No sub-agent tasks in this session."
+
     runs.sort(key=lambda r: r.created_at, reverse=True)
-    
-    lines = ["子 Agent 任务列表:", ""]
-    
+
     status_icons = {
         "pending": "⏳",
         "running": "🔄",
         "completed": "✅",
         "failed": "❌",
-        "timeout": "⏰"
+        "timeout": "⏰",
+        "cancelled": "🛑",
     }
-    
+
+    lines = ["Sub-agent tasks:", ""]
     for run in runs:
         icon = status_icons.get(run.status, "❓")
         created = run.created_at.strftime("%H:%M:%S")
-        
-        line = f"{icon} [{run.run_id}] {run.label}"
-        line += f" | 状态: {run.status}"
-        line += f" | 创建: {created}"
-        
+
+        line = f"{icon} [{run.run_id}] {run.label} | status: {run.status} | created: {created}"
         if run.completed_at:
             duration = (run.completed_at - run.created_at).total_seconds()
-            line += f" | 耗时: {duration:.1f}s"
-        
+            line += f" | duration: {duration:.1f}s"
+        if run.llm_profile:
+            line += f" | profile: {run.llm_profile}"
         lines.append(line)
-        
-        # 显示任务摘要
-        task_summary = run.task[:60] + "..." if len(run.task) > 60 else run.task
-        lines.append(f"   任务: {task_summary}")
-        
-        # 如果已完成，显示结果摘要
+
+        task_summary = run.task[:80] + "..." if len(run.task) > 80 else run.task
+        lines.append(f"   task: {task_summary}")
+
         if run.status == "completed" and run.result:
-            result_summary = run.result[:80] + "..." if len(run.result) > 80 else run.result
-            lines.append(f"   结果: {result_summary}")
+            result_summary = run.result[:100] + "..." if len(run.result) > 100 else run.result
+            lines.append(f"   result: {result_summary}")
         elif run.error:
-            lines.append(f"   错误: {run.error}")
-        
+            lines.append(f"   error: {run.error}")
+
         lines.append("")
-    
+
+    return "\n".join(lines)
+
+
+@registry.register(
+    name="agent_query",
+    description="Get detailed status and result of a specific sub-agent by run_id.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "run_id": {
+                "type": "string",
+                "description": "The run_id of the sub-agent to query",
+            },
+        },
+        "required": ["run_id"],
+    },
+)
+async def agent_query(run_id: str, context=None) -> str:
+    if not context:
+        return "Error: missing execution context"
+
+    run = _registry.get(run_id)
+    if not run:
+        return f"Error: sub-agent run_id={run_id} not found"
+
+    lines = [
+        f"Sub-agent [{run_id}]",
+        f"  label:    {run.label}",
+        f"  status:   {run.status}",
+        f"  created:  {run.created_at.strftime('%Y-%m-%d %H:%M:%S')}",
+    ]
+
+    if run.completed_at:
+        lines.append(f"  finished: {run.completed_at.strftime('%Y-%m-%d %H:%M:%S')}")
+        duration = (run.completed_at - run.created_at).total_seconds()
+        lines.append(f"  duration: {duration:.1f}s")
+
+    if run.llm_profile:
+        lines.append(f"  profile:  {run.llm_profile}")
+
+    lines.append(f"  tools:    {', '.join(run.tools) if run.tools else '(none)'}")
+
+    task_display = run.task[:200] + "..." if len(run.task) > 200 else run.task
+    lines.append(f"  task:     {task_display}")
+
+    if run.status == "completed" and run.result is not None:
+        lines.append(f"\n--- Result ---\n{run.result}")
+    elif run.error:
+        lines.append(f"\n--- Error ---\n{run.error}")
+    elif run.status == "running":
+        lines.append("\nThe sub-agent is still running. Use agent_query again later to check.")
+
     return "\n".join(lines)
 
 
 @registry.register(
     name="agent_send",
-    description="给子 Agent 发送消息（用于正在运行的子 Agent 进行交互）",
+    description="Send a message to a running background sub-agent.",
     parameters={
         "type": "object",
         "properties": {
             "run_id": {
-                "type": "string", 
-                "description": "子 Agent 的 run_id"
+                "type": "string",
+                "description": "The run_id of the sub-agent",
             },
             "message": {
-                "type": "string", 
-                "description": "要发送的消息"
-            }
+                "type": "string",
+                "description": "Message to send",
+            },
         },
-        "required": ["run_id", "message"]
-    }
+        "required": ["run_id", "message"],
+    },
 )
 async def agent_send(run_id: str, message: str, context=None) -> str:
-    """
-    给子 Agent 发送消息。当前子 Agent 为同步执行模式，执行结束后即结束，暂不支持中途发送消息。
-    """
     if not context:
-        return "错误: 缺少执行上下文"
-    run = _subagent_registry.get(run_id)
+        return "Error: missing execution context"
+
+    run = _registry.get(run_id)
     if not run:
-        return f"错误: 找不到子 Agent run_id={run_id}"
-    return "当前子 Agent 为同步执行模式，执行完成后即结束，暂不支持 agent_send 中途发送消息。请使用 wait=True 等待结果，或通过 agent_history 查看已完成任务的对话。"
+        return f"Error: sub-agent run_id={run_id} not found"
+
+    # The ReAct loop does not support mid-execution message injection.
+    return (
+        f"Sub-agent {run_id} runs autonomously and does not accept mid-execution messages. "
+        f"Its current status is: {run.status}.\n"
+        f"Use agent_query(run_id=\"{run_id}\") to check its progress or result."
+    )
+
+
+@registry.register(
+    name="agent_stop",
+    description="Stop a running background sub-agent by cancelling its task.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "run_id": {
+                "type": "string",
+                "description": "The run_id of the sub-agent to stop",
+            },
+        },
+        "required": ["run_id"],
+    },
+)
+async def agent_stop(run_id: str, context=None) -> str:
+    if not context:
+        return "Error: missing execution context"
+
+    error = await _registry.stop(run_id)
+    if error:
+        return f"Error: {error}"
+
+    logger.info(f"SubAgent {run_id} stopped by user")
+    return f"Sub-agent {run_id} has been cancelled."
 
 
 @registry.register(
     name="agent_history",
-    description="获取子 Agent 的对话历史",
+    description="Read the conversation history of a sub-agent run.",
     parameters={
         "type": "object",
         "properties": {
             "run_id": {
-                "type": "string", 
-                "description": "子 Agent 的 run_id"
+                "type": "string",
+                "description": "The run_id of the sub-agent",
             },
             "limit": {
-                "type": "integer", 
-                "description": "返回消息数量",
-                "default": 10
-            }
+                "type": "integer",
+                "description": "Max number of messages to return",
+                "default": 10,
+            },
         },
-        "required": ["run_id"]
-    }
+        "required": ["run_id"],
+    },
 )
 async def agent_history(run_id: str, limit: int = 10, context=None) -> str:
-    """
-    获取子 Agent 的对话历史
-    
-    参数:
-    - run_id: 子 Agent 的运行 ID
-    - limit: 返回的消息数量限制
-    
-    返回: 格式化的对话历史
-    """
     if not context:
-        return "错误: 缺少执行上下文"
-    
+        return "Error: missing execution context"
+
     memory = context.get("memory")
     if not memory:
-        return "错误: 缺少 memory 引用"
-    
-    run = _subagent_registry.get(run_id)
+        return "Error: memory not available"
+
+    run = _registry.get(run_id)
     if not run:
-        return f"错误: 找不到子 Agent run_id={run_id}"
-    
-    # 从 memory 获取子 Agent 的对话历史
+        return f"Error: sub-agent run_id={run_id} not found"
+
     history = memory.get_history(run.child_session, limit=limit)
-    
     if not history:
-        return f"子 Agent {run_id} 暂无对话历史。"
-    
+        return f"Sub-agent {run_id} has no conversation history yet."
+
     lines = [
-        f"子 Agent [{run_id}] 对话历史:",
-        f"状态: {run.status} | 任务: {run.label}",
-        "-" * 40
+        f"Sub-agent [{run_id}] conversation history:",
+        f"  status: {run.status} | label: {run.label}",
+        "-" * 40,
     ]
-    
+
     for msg in history:
-        role = "🧑 用户" if msg["role"] == "user" else "🤖 助手"
+        role = "User" if msg["role"] == "user" else "Assistant"
         content = msg["content"]
-        # 截断过长的内容
         if len(content) > 500:
-            content = content[:500] + "...(已截断)"
-        lines.append(f"\n{role}:")
+            content = content[:500] + "...(truncated)"
+        lines.append(f"\n[{role}]:")
         lines.append(content)
-    
+
     return "\n".join(lines)
 
 
-# ===== 辅助函数 =====
+# ===== Public helper =====
 
 def get_subagent_registry() -> SubAgentRegistry:
-    """获取全局子 Agent 注册表（供外部模块使用）"""
-    return _subagent_registry
+    """Return the global sub-agent registry (for external use)."""
+    return _registry

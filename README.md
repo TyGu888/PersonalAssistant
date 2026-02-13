@@ -12,10 +12,13 @@ Started as a learning / tinkering project—keeping it **simple and approachable
 - **Gateway hub** — FastAPI + WebSocket; connects channel services and remote clients (CLI, Web UI)
 - **Multi-channel** — Discord, Telegram, Slack, Feishu (飞书), QQ, WeCom (企业微信), WebSocket CLI
 - **Plugin skills** — Agent loads `SKILL.md` on demand for role and task guidance
-- **Pluggable tools** — Scheduler, filesystem, shell (with Docker sandbox), web search, MCP, cross-channel messaging, memory search/add
+- **Pluggable tools** — Scheduler, filesystem, shell (with Docker sandbox), web search, MCP (static + dynamic hot-plug), cross-channel messaging, memory search/add, Computer Use (GUI automation), config hot-reload
 - **Long-term memory** — Session history (SQLite), RAG (ChromaDB), cross-channel identity mapping
 - **Token control** — tiktoken-based counting and context truncation
 - **Multimodal** — Image handling and Vision API
+- **Computer Use** — GUI automation via `computer_action` (Hierarchical ReAct: agent issues high-level task → GroundingEngine autonomously screenshots, locates, clicks, types, verifies). Pluggable Vision backend (Qwen3VL default)
+- **Dynamic sub-agents** — Main agent spawns sub-agents on the fly with custom prompt, tools, and LLM profile; foreground (blocking) or background (async) with lifecycle management
+- **Runtime config** — Switch LLM profiles, reload skills, connect/disconnect MCP servers — all at runtime via tools
 - **Docker sandbox** — Isolated shell execution in containers
 - **Periodic wake** — Agent can run on a schedule (e.g. checks, reminders)
 - **Request–response on the bus** — HTTP/WebSocket clients can await a reply for the same request via envelope futures
@@ -42,7 +45,10 @@ export DISCORD_BOT_TOKEN="..."
 export TELEGRAM_BOT_TOKEN="..."
 export SLACK_BOT_TOKEN="..." && export SLACK_APP_TOKEN="..."
 export FEISHU_APP_ID="..." && export FEISHU_APP_SECRET="..."
+export WECOM_CORP_ID="..." && export WECOM_APP_SECRET="..." && export WECOM_AGENT_ID="..."
+export WECOM_TOKEN="..." && export WECOM_AES_KEY="..."
 export HTTP_API_KEY="your-http-api-key"
+export DASHSCOPE_API_KEY="..."   # Optional: Qwen3VL for Computer Use
 ```
 
 ### 3. Run
@@ -93,7 +99,7 @@ python main.py client --host localhost --port 8080 --api-key your-key
 ├── agent/                  # AgentLoop, AgentRuntime, BaseAgent, DefaultAgent
 ├── channels/               # Telegram, Discord, Slack, Feishu, QQ, WeCom
 ├── cli_client/             # WebSocket CLI client
-├── tools/                  # Registry, channel, scheduler, filesystem, shell, web, MCP, memory, …
+├── tools/                  # Registry, channel, scheduler, filesystem, shell, web, MCP, memory, computer_use, …
 ├── skills/                 # Plugin skills (SKILL.md per skill)
 ├── worker/                 # Optional agent worker pool
 ├── core/                   # Types, router
@@ -133,6 +139,10 @@ memory:
   identity_mode: "single_owner"
   max_context_messages: 50
   max_context_tokens: 16000
+
+computer_use:
+  enabled: false              # requires pyautogui + macOS Accessibility permission
+  vision_profile: qwen3_vl    # swap model by changing this profile
 ```
 
 ## Gateway API
@@ -167,6 +177,19 @@ curl -X POST http://localhost:8080/chat \
 
 **New channel** — Subclass `BaseChannel`, implement `start()`, `deliver(target, message)`, `stop()`, and call `self.publish_message(msg)` to push to the MessageBus.
 
+## Computer Use (GUI automation)
+
+Enable in config: `computer_use.enabled: true`. Requires:
+
+```bash
+pip install pyautogui pyperclip
+# macOS: System Settings → Privacy & Security → Accessibility → allow Terminal/Python
+```
+
+The agent gets a `computer_action` tool that accepts natural-language GUI tasks (e.g. "open WeChat, find Zhang San, send message: meeting tomorrow"). Internally, the GroundingEngine loops autonomously: screenshot → VisionLLM plan+locate → PyAutoGUI execute → verify → repeat. The agent only sees a text result.
+
+Vision backend is pluggable — change `computer_use.vision_profile` in config to switch models (Qwen3VL, GPT-4o, Claude, etc.). See `docs/ui-use-design.md` for full architecture.
+
 ## Docker sandbox
 
 ```bash
@@ -177,7 +200,9 @@ Enable in config: `sandbox.enabled: true`.
 
 ## MCP
 
-Configure MCP servers in `config.yaml` under `mcp.servers` (e.g. filesystem server). The agent can call MCP tools via the registry.
+**Static:** Configure MCP servers in `config.yaml` under `mcp.servers` — they connect at startup.
+
+**Dynamic:** The agent can connect/disconnect MCP servers at runtime via tools (`mcp_connect`, `mcp_disconnect`, `mcp_list`). Example: the agent decides it needs a GitHub server and connects it mid-conversation.
 
 ## License
 

@@ -15,3 +15,6 @@ import tools.feishu_actions
 import tools.qq_actions
 import tools.wecom_actions
 import tools.wedrive
+import tools.computer_use    # Computer Use (GUI 操作), 需要 pyautogui
+import tools.config_manager  # 运行时配置热更新
+import tools.mcp_tools       # MCP 动态热插拔
