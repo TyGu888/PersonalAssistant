@@ -363,6 +363,7 @@ agent:
 
 ### 待测试
 
+- [x] Browser 工具 (browser_open/goto/click/fill/snapshot/close)
 - [ ] Discord Channel deliver 模式完整对话
 - [ ] Telegram Channel deliver 模式完整对话  
 - [ ] CLI Client WebSocket RPC 工具调用
