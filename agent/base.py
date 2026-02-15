@@ -5,6 +5,7 @@ from utils.token_counter import TokenCounter
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import Optional, Union
 
@@ -200,6 +201,14 @@ class BaseAgent:
             
             # 将 tool 结果追加到 messages
             messages.extend(tool_messages)
+            
+            # 自动检测 tool result 中的图片路径，塞给 LLM 查看
+            tool_images = self._extract_image_paths(tool_messages)
+            if tool_images:
+                messages.append(self._build_user_message(
+                    "[系统: 以下是工具产生的图片，请查看]",
+                    tool_images
+                ))
             
             iteration += 1
         
@@ -407,12 +416,16 @@ class BaseAgent:
             {"role": "system", "content": system_content}
         ]
         
-        # 添加历史消息
+        # 添加历史消息（支持多模态）
         for msg in history:
-            messages.append({
-                "role": msg.role,
-                "content": msg.content
-            })
+            if msg.images:
+                # Reconstruct multimodal message
+                messages.append(self._build_user_message(msg.content, msg.images))
+            else:
+                messages.append({
+                    "role": msg.role,
+                    "content": msg.content
+                })
         
         # 添加当前用户消息（支持图片）
         user_message = self._build_user_message(user_text, images)
@@ -618,3 +631,24 @@ class BaseAgent:
             })
         
         return tool_messages
+    
+    _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+    
+    def _extract_image_paths(self, tool_messages: list[dict]) -> list[str]:
+        """
+        从 tool result text 中自动提取存在的图片文件路径。
+        
+        扫描每条 tool message 的 content，找出以 / 开头的绝对路径 token，
+        如果文件存在且是图片扩展名，收集起来。
+        """
+        images = []
+        for msg in tool_messages:
+            content = msg.get("content", "")
+            if not content:
+                continue
+            # 按空格和换行拆 token，找绝对路径
+            for token in content.replace("\n", " ").split():
+                if token.startswith("/") and os.path.splitext(token)[1].lower() in self._IMAGE_EXTS:
+                    if os.path.isfile(token):
+                        images.append(token)
+        return images

@@ -88,78 +88,79 @@ def parse_reminder_time(time_str: str) -> datetime:
 
 
 @registry.register(
-    name="scheduler_add",
-    description="添加定时提醒",
+    name="scheduler",
+    description=(
+        "Manage scheduled reminders. "
+        "Actions: add (set new reminder), list (show user's reminders), cancel (remove a reminder)."
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "time": {
+            "action": {
                 "type": "string",
-                "description": "提醒时间。格式: 'HH:MM'(今天) 或 'YYYY-MM-DD HH:MM'"
+                "enum": ["add", "list", "cancel"],
+                "description": "Action to perform"
             },
-            "content": {
-                "type": "string", 
-                "description": "提醒内容"
-            },
-            "user_id": {
-                "type": "string",
-                "description": "提醒谁（用户ID）"
-            },
-            "channel": {
-                "type": "string",
-                "description": "通过哪个渠道提醒"
-            },
-            "auto_continue": {
-                "type": "boolean",
-                "description": "是否为循环提醒。若为 True，触发时会唤醒 Agent 处理，Agent 可决定是否设置下一次提醒"
-            }
+            "time": {"type": "string", "description": "Reminder time: 'HH:MM' or 'YYYY-MM-DD HH:MM' (for add)"},
+            "content": {"type": "string", "description": "Reminder content (for add)"},
+            "user_id": {"type": "string", "description": "User ID (for add/list)"},
+            "channel": {"type": "string", "description": "Channel to deliver reminder (for add)"},
+            "auto_continue": {"type": "boolean", "description": "Loop reminder (for add)"},
+            "job_id": {"type": "string", "description": "Job ID to cancel (for cancel)"}
         },
-        "required": ["time", "content", "user_id", "channel"]
+        "required": ["action"]
     }
 )
-async def scheduler_add(time: str, content: str, user_id: str, channel: str, auto_continue: bool = False, context=None) -> str:
-    """
-    添加定时任务（使用注入的 context）
-    
-    context 包含:
-    - scheduler: APScheduler 实例
-    - bus: MessageBus 实例（用于投递唤醒消息）
-    
-    流程:
-    1. 解析时间字符串（支持 'HH:MM' 和 'YYYY-MM-DD HH:MM'）
-    2. 创建 job callback（通过 MessageBus 唤醒 Agent 处理）
-    3. 使用 scheduler.add_job 添加任务
-    """
+async def scheduler(action: str, time: str = None, content: str = None, user_id: str = None,
+                    channel: str = None, auto_continue: bool = False, job_id: str = None, context=None) -> str:
+    """Manage scheduled reminders."""
+
+    if action == "add":
+        return await _scheduler_add(time=time, content=content, user_id=user_id,
+                                    channel=channel, auto_continue=auto_continue, context=context)
+    elif action == "list":
+        return await _scheduler_list(user_id=user_id, context=context)
+    elif action == "cancel":
+        return await _scheduler_cancel(job_id=job_id, context=context)
+    else:
+        return f"错误: 未知 action '{action}'。可用: add, list, cancel"
+
+
+async def _scheduler_add(time: str = None, content: str = None, user_id: str = None,
+                         channel: str = None, auto_continue: bool = False, context=None) -> str:
+    """添加定时任务"""
     if context is None:
         return "错误: 缺少上下文信息"
-    
-    scheduler = context.get("scheduler")
-    if scheduler is None:
+
+    if not time or not content or not user_id or not channel:
+        return "错误: add 操作需要 time, content, user_id, channel"
+
+    sched = context.get("scheduler")
+    if sched is None:
         return "错误: 无法获取 scheduler 实例"
-    
+
     # 解析时间
     try:
         run_date = parse_reminder_time(time)
     except ValueError as e:
         return f"错误: {str(e)}"
-    
+
     # 检查时间是否在过去
     now = datetime.now()
     if run_date <= now:
         return f"错误: 提醒时间 {run_date.strftime('%Y-%m-%d %H:%M')} 已经过去了。当前时间是 {now.strftime('%Y-%m-%d %H:%M')}，请设置一个未来的时间。"
-    
+
     # 生成唯一 job_id
-    job_id = f"reminder_{user_id}_{uuid.uuid4().hex[:8]}"
-    
-    logger.debug(f"scheduler_add: user_id={user_id}, job_id={job_id}")
-    
-    # 使用可序列化的函数引用（模块路径字符串），以便 jobstore 持久化后重启可恢复
+    jid = f"reminder_{user_id}_{uuid.uuid4().hex[:8]}"
+
+    logger.debug(f"scheduler add: user_id={user_id}, job_id={jid}")
+
     try:
-        scheduler.add_job(
+        sched.add_job(
             REMINDER_JOB_FUNC,
             "date",
             run_date=run_date,
-            id=job_id,
+            id=jid,
             kwargs={
                 "content": content,
                 "user_id": user_id,
@@ -168,8 +169,7 @@ async def scheduler_add(time: str, content: str, user_id: str, channel: str, aut
             },
             replace_existing=True,
         )
-        
-        # 格式化返回消息
+
         time_str = run_date.strftime("%Y-%m-%d %H:%M")
         mode = "循环提醒" if auto_continue else "单次提醒"
         return f"已设置{mode}：{time_str} - {content}"
@@ -177,49 +177,29 @@ async def scheduler_add(time: str, content: str, user_id: str, channel: str, aut
         return f"错误: 添加定时任务失败 - {str(e)}"
 
 
-@registry.register(
-    name="scheduler_list",
-    description="列出用户的所有定时提醒",
-    parameters={
-        "type": "object",
-        "properties": {
-            "user_id": {"type": "string", "description": "用户ID"}
-        },
-        "required": ["user_id"]
-    }
-)
-async def scheduler_list(user_id: str, context=None) -> str:
-    """
-    列出定时任务
-    
-    流程:
-    1. 从 scheduler 获取所有 jobs
-    2. 过滤出该用户的任务（通过 job.id 或 job.args）
-    3. 格式化输出
-    
-    返回: 任务列表文本
-    """
+async def _scheduler_list(user_id: str = None, context=None) -> str:
+    """列出定时任务"""
     if context is None:
         return "错误: 缺少上下文信息"
-    
-    scheduler = context.get("scheduler")
-    if scheduler is None:
+
+    if not user_id:
+        return "错误: list 操作需要 user_id"
+
+    sched = context.get("scheduler")
+    if sched is None:
         return "错误: 无法获取 scheduler 实例"
-    
+
     try:
-        # 获取所有任务
-        jobs = scheduler.get_jobs()
-        
-        # 过滤出该用户的任务（job_id 格式为 reminder_{user_id}_{uuid}）
+        jobs = sched.get_jobs()
+
         user_jobs = []
         for job in jobs:
             if job.id and job.id.startswith(f"reminder_{user_id}_"):
                 user_jobs.append(job)
-        
+
         if not user_jobs:
             return f"用户 {user_id} 暂无定时提醒"
-        
-        # 格式化输出
+
         lines = [f"用户 {user_id} 的定时提醒列表："]
         for i, job in enumerate(user_jobs, 1):
             run_date = job.next_run_time
@@ -227,50 +207,36 @@ async def scheduler_list(user_id: str, context=None) -> str:
             auto_continue = job.kwargs.get('auto_continue', False)
             job_id_short = job.id.split('_')[-1] if '_' in job.id else job.id
             mode_tag = "[循环]" if auto_continue else "[单次]"
-            
+
             if run_date:
                 time_str = run_date.strftime("%Y-%m-%d %H:%M")
                 lines.append(f"{i}. [{job_id_short}] {mode_tag} {time_str} - {content}")
             else:
                 lines.append(f"{i}. [{job_id_short}] {mode_tag} 时间未设置 - {content}")
-        
+
         return "\n".join(lines)
     except Exception as e:
         return f"错误: 获取任务列表失败 - {str(e)}"
 
 
-@registry.register(
-    name="scheduler_cancel",
-    description="取消定时提醒",
-    parameters={
-        "type": "object",
-        "properties": {
-            "job_id": {"type": "string", "description": "任务ID"}
-        },
-        "required": ["job_id"]
-    }
-)
-async def scheduler_cancel(job_id: str, context=None) -> str:
-    """
-    取消任务
-    
-    返回: "已取消提醒: {job_id}"
-    """
+async def _scheduler_cancel(job_id: str = None, context=None) -> str:
+    """取消任务"""
     if context is None:
         return "错误: 缺少上下文信息"
-    
-    scheduler = context.get("scheduler")
-    if scheduler is None:
+
+    if not job_id:
+        return "错误: cancel 操作需要 job_id"
+
+    sched = context.get("scheduler")
+    if sched is None:
         return "错误: 无法获取 scheduler 实例"
-    
+
     try:
-        # 检查任务是否存在
-        job = scheduler.get_job(job_id)
+        job = sched.get_job(job_id)
         if job is None:
             return f"错误: 任务 {job_id} 不存在"
-        
-        # 移除任务
-        scheduler.remove_job(job_id)
+
+        sched.remove_job(job_id)
         return f"已取消提醒: {job_id}"
     except Exception as e:
         return f"错误: 取消任务失败 - {str(e)}"

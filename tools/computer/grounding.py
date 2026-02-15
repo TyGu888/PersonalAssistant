@@ -219,7 +219,7 @@ class GroundingEngine:
         cu_config = config.get("computer_use", {})
 
         # Action Backend
-        screenshot_dir = cu_config.get("screenshot_dir", "/tmp/agent_screenshots")
+        screenshot_dir = cu_config.get("screenshot_dir", "data/screenshots")
         self.actions = ActionBackend(screenshot_dir=screenshot_dir)
 
         # Memory

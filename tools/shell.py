@@ -167,14 +167,24 @@ async def _run_command_in_sandbox(
 
 @registry.register(
     name="run_command",
-    description="执行 shell 命令（有安全限制，可在沙箱中执行）",
+    description=(
+        "Execute a shell command. "
+        "When sandbox is enabled (check current config), commands run inside a Docker container by default "
+        "(isolated environment at /workspace, with the host's data/workspace mounted). "
+        "Set use_sandbox=false to run on the host machine instead (required for host-only tools like screencapture). "
+        "Set use_sandbox=true to force sandbox even if disabled by default. "
+        "Screenshots should be saved to data/screenshots/ (e.g. screencapture -x data/screenshots/shot.png). "
+        "The framework auto-detects image paths in output and shows them to the LLM. "
+        "This tool does NOT preserve state between calls (cd, export, etc. are lost). "
+        "For stateful shell sessions, use the shell_session tool."
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "command": {"type": "string", "description": "要执行的命令"},
-            "working_dir": {"type": "string", "description": "工作目录（可选，默认为项目根目录或工作区）"},
-            "timeout": {"type": "integer", "description": "超时秒数", "default": 30},
-            "use_sandbox": {"type": "boolean", "description": "是否使用 Docker 沙箱执行（可选，默认根据配置决定）"}
+            "command": {"type": "string", "description": "Shell command to execute"},
+            "working_dir": {"type": "string", "description": "Working directory (default: data/workspace on host, /workspace in sandbox)"},
+            "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 30},
+            "use_sandbox": {"type": "boolean", "description": "true=force sandbox, false=force host, omit=use config default (currently sandbox is enabled by config)"}
         },
         "required": ["command"]
     }
@@ -233,9 +243,6 @@ async def run_command(command: str, working_dir: str = None, timeout: int = 30, 
         
         # 3. 执行命令
         try:
-            # 使用 subprocess.run 执行命令
-            # shell=True 允许使用 shell 特性，但需要小心处理
-            # 使用 shlex.split 来安全地分割命令
             result = subprocess.run(
                 command,
                 shell=True,
@@ -244,7 +251,7 @@ async def run_command(command: str, working_dir: str = None, timeout: int = 30, 
                 text=True,
                 timeout=timeout,
                 encoding='utf-8',
-                errors='replace'  # 处理编码错误
+                errors='replace'
             )
             
             exit_code = result.returncode
@@ -253,7 +260,6 @@ async def run_command(command: str, working_dir: str = None, timeout: int = 30, 
             output = result.stdout if result.stdout else ""
             error_output = result.stderr if result.stderr else ""
             
-            # 合并 stdout 和 stderr
             combined_output = ""
             if output:
                 combined_output += output
@@ -262,7 +268,6 @@ async def run_command(command: str, working_dir: str = None, timeout: int = 30, 
                     combined_output += "\n"
                 combined_output += error_output
             
-            # 截断输出
             MAX_OUTPUT_LENGTH = 2000
             if len(combined_output) > MAX_OUTPUT_LENGTH:
                 truncated = combined_output[:MAX_OUTPUT_LENGTH]
@@ -615,277 +620,185 @@ _session_manager = ShellSessionManager()
 
 
 # ============================================================
-# Shell 会话 Tools
+# Shell 会话 Tool (merged: start/exec/stop/list)
 # ============================================================
 
 @registry.register(
-    name="shell_session_start",
-    description="启动一个新的持久化 Shell 会话。会话可以保持工作目录和环境变量状态。",
+    name="shell_session",
+    description=(
+        "Manage persistent shell sessions that preserve working directory and environment variables across commands. "
+        "Actions: start (create new session), exec (run command in session), stop (close session), list (show active sessions)."
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "timeout_minutes": {
-                "type": "integer",
-                "description": "会话超时时间（分钟），默认 30 分钟",
-                "default": 30
-            }
+            "action": {
+                "type": "string",
+                "enum": ["start", "exec", "stop", "list"],
+                "description": "Action to perform"
+            },
+            "session_id": {"type": "string", "description": "Session ID (required for exec/stop)"},
+            "command": {"type": "string", "description": "Command to execute (required for exec)"},
+            "timeout": {"type": "integer", "description": "Timeout in seconds (for start: session timeout in minutes, default 30; for exec: command timeout in seconds, default 60)"}
         },
-        "required": []
+        "required": ["action"]
     }
 )
-async def shell_session_start(timeout_minutes: int = 30, context=None) -> str:
-    """
-    启动一个新的 Shell 会话
-    
-    返回会话 ID，后续命令使用此 ID 在同一会话中执行
-    """
-    success, session_id, message = await _session_manager.create_session(timeout_minutes)
-    
-    if success:
-        return f"✓ {message}\n提示: 使用 shell_session_exec 在此会话中执行命令"
-    else:
-        return f"✗ 创建会话失败: {message}"
+async def shell_session(action: str, session_id: str = None, command: str = None, timeout: int = None, context=None) -> str:
+    """Manage persistent shell sessions."""
 
+    if action == "start":
+        timeout_minutes = timeout if timeout is not None else 30
+        success, sid, message = await _session_manager.create_session(timeout_minutes)
+        if success:
+            return f"✓ {message}\n提示: 使用 shell_session(action='exec', session_id='{sid}', command='...') 在此会话中执行命令"
+        else:
+            return f"✗ 创建会话失败: {message}"
 
-@registry.register(
-    name="shell_session_exec",
-    description="在指定的 Shell 会话中执行命令。会话会保持工作目录和环境变量状态。",
-    parameters={
-        "type": "object",
-        "properties": {
-            "session_id": {
-                "type": "string",
-                "description": "会话 ID（由 shell_session_start 返回）"
-            },
-            "command": {
-                "type": "string",
-                "description": "要执行的命令"
-            },
-            "timeout": {
-                "type": "integer",
-                "description": "命令超时秒数，默认 60 秒",
-                "default": 60
-            }
-        },
-        "required": ["session_id", "command"]
-    }
-)
-async def shell_session_exec(session_id: str, command: str, timeout: int = 60, context=None) -> str:
-    """
-    在指定会话中执行命令
-    
-    特点:
-    - 保持工作目录状态（cd 命令有效）
-    - 保持环境变量状态（export 命令有效）
-    - 支持命令超时
-    - 输出截断（最大 4000 字符）
-    """
-    # 安全检查
-    is_dangerous, reason = _check_dangerous_command(command)
-    if is_dangerous:
-        return f"✗ 错误: {reason}\n命令: {command}"
-    
-    success, output = await _session_manager.execute(session_id, command, timeout)
-    
-    if success:
-        # 获取会话信息
+    elif action == "exec":
+        if not session_id:
+            return "错误: exec 操作需要 session_id"
+        if not command:
+            return "错误: exec 操作需要 command"
+        # 安全检查
+        is_dangerous, reason = _check_dangerous_command(command)
+        if is_dangerous:
+            return f"✗ 错误: {reason}\n命令: {command}"
+        exec_timeout = timeout if timeout is not None else 60
+        success, output = await _session_manager.execute(session_id, command, exec_timeout)
+        if success:
+            sessions = _session_manager.list_sessions()
+            current_session = next((s for s in sessions if s["session_id"] == session_id), None)
+            current_dir = current_session["current_dir"] if current_session else "未知"
+            return f"命令: {command}\n工作目录: {current_dir}\n{output}"
+        else:
+            return f"✗ 执行失败: {output}\n命令: {command}"
+
+    elif action == "stop":
+        if not session_id:
+            return "错误: stop 操作需要 session_id"
+        success, message = await _session_manager.stop_session(session_id)
+        if success:
+            return f"✓ {message}"
+        else:
+            return f"✗ {message}"
+
+    elif action == "list":
         sessions = _session_manager.list_sessions()
-        current_session = next((s for s in sessions if s["session_id"] == session_id), None)
-        current_dir = current_session["current_dir"] if current_session else "未知"
-        
-        return f"命令: {command}\n工作目录: {current_dir}\n{output}"
+        if not sessions:
+            return "当前没有活跃的 Shell 会话"
+        lines = [f"活跃会话数: {len(sessions)}", ""]
+        for session in sessions:
+            status = "运行中" if session["is_running"] else "已停止"
+            lines.append(f"会话 ID: {session['session_id']}")
+            lines.append(f"  状态: {status}")
+            lines.append(f"  工作目录: {session['current_dir']}")
+            lines.append(f"  创建时间: {session['created_at']}")
+            lines.append(f"  最后使用: {session['last_used']}")
+            lines.append(f"  空闲时间: {session['idle_seconds']} 秒")
+            lines.append(f"  超时设置: {session['timeout_minutes']} 分钟")
+            lines.append("")
+        return "\n".join(lines)
+
     else:
-        return f"✗ 执行失败: {output}\n命令: {command}"
-
-
-@registry.register(
-    name="shell_session_stop",
-    description="关闭指定的 Shell 会话",
-    parameters={
-        "type": "object",
-        "properties": {
-            "session_id": {
-                "type": "string",
-                "description": "要关闭的会话 ID"
-            }
-        },
-        "required": ["session_id"]
-    }
-)
-async def shell_session_stop(session_id: str, context=None) -> str:
-    """关闭指定的 Shell 会话"""
-    success, message = await _session_manager.stop_session(session_id)
-    
-    if success:
-        return f"✓ {message}"
-    else:
-        return f"✗ {message}"
-
-
-@registry.register(
-    name="shell_session_list",
-    description="列出所有活跃的 Shell 会话",
-    parameters={
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-)
-async def shell_session_list(context=None) -> str:
-    """列出所有活跃的 Shell 会话"""
-    sessions = _session_manager.list_sessions()
-    
-    if not sessions:
-        return "当前没有活跃的 Shell 会话"
-    
-    lines = [f"活跃会话数: {len(sessions)}", ""]
-    
-    for session in sessions:
-        status = "运行中" if session["is_running"] else "已停止"
-        lines.append(f"会话 ID: {session['session_id']}")
-        lines.append(f"  状态: {status}")
-        lines.append(f"  工作目录: {session['current_dir']}")
-        lines.append(f"  创建时间: {session['created_at']}")
-        lines.append(f"  最后使用: {session['last_used']}")
-        lines.append(f"  空闲时间: {session['idle_seconds']} 秒")
-        lines.append(f"  超时设置: {session['timeout_minutes']} 分钟")
-        lines.append("")
-    
-    return "\n".join(lines)
+        return f"错误: 未知 action '{action}'。可用: start, exec, stop, list"
 
 
 # =====================
-# Docker 沙箱管理工具（从 sandbox.py 迁移）
+# Docker 沙箱管理 Tool (merged: status/stop/copy_to/copy_from)
 # sandbox_exec 和 sandbox_start 已移除（run_command 自动路由到沙箱）
 # =====================
 
 
 @registry.register(
-    name="sandbox_stop",
-    description="停止 Docker 沙箱容器",
-    parameters={
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-)
-async def sandbox_stop(context=None) -> str:
-    """停止沙箱容器"""
-    sandbox_module = _get_sandbox_module()
-    try:
-        sandbox = sandbox_module.get_sandbox()
-        if not sandbox.is_running():
-            return "沙箱容器未运行"
-        await sandbox.stop()
-        sandbox_module._sandbox_instance = None
-        return "沙箱容器已停止并清理"
-    except Exception as e:
-        return f"停止沙箱失败: {e}"
-
-
-@registry.register(
-    name="sandbox_status",
-    description="查看 Docker 沙箱状态",
-    parameters={
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-)
-async def sandbox_status(context=None) -> str:
-    """查看沙箱状态"""
-    try:
-        sandbox_module = _get_sandbox_module()
-        config = sandbox_module._get_sandbox_config()
-        sandbox = sandbox_module.get_sandbox()
-        is_running = sandbox.is_running()
-
-        status_lines = [
-            "=== Docker 沙箱状态 ===",
-            f"配置启用: {'是' if config.get('enabled') else '否'}",
-            f"容器运行: {'是' if is_running else '否'}",
-            f"镜像: {config.get('image')}",
-            f"内存限制: {config.get('memory_limit')}",
-            f"CPU 限制: {config.get('cpu_limit')}",
-            f"网络模式: {config.get('network')}",
-        ]
-        if is_running and sandbox.container:
-            status_lines.append(f"容器 ID: {sandbox.container.id[:12]}")
-        return "\n".join(status_lines)
-    except Exception as e:
-        return f"获取状态失败: {e}"
-
-
-@registry.register(
-    name="sandbox_copy_to",
-    description="复制文件到 Docker 沙箱容器",
+    name="sandbox",
+    description=(
+        "Manage the Docker sandbox container. "
+        "Actions: status (view sandbox state), stop (stop container), copy_to (copy file into sandbox), copy_from (copy file out of sandbox)."
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "local_path": {
+            "action": {
                 "type": "string",
-                "description": "本地文件路径"
+                "enum": ["status", "stop", "copy_to", "copy_from"],
+                "description": "Action to perform"
             },
-            "container_path": {
-                "type": "string",
-                "description": "容器内目标目录",
-                "default": "/workspace"
-            }
+            "local_path": {"type": "string", "description": "Local file path (for copy_to/copy_from)"},
+            "container_path": {"type": "string", "description": "Container file path (for copy_to: default /workspace, for copy_from: required)"}
         },
-        "required": ["local_path"]
+        "required": ["action"]
     }
 )
-async def sandbox_copy_to(
-    local_path: str,
-    container_path: str = "/workspace",
-    context=None
-) -> str:
-    """复制文件到沙箱"""
-    try:
-        sandbox_module = _get_sandbox_module()
-        sandbox = sandbox_module.get_sandbox()
-        if not sandbox.is_running():
-            return "沙箱容器未运行，请先执行一条命令以自动启动"
-        await sandbox.copy_to(local_path, container_path)
-        return f"已复制文件到沙箱\n本地: {local_path}\n容器: {container_path}"
-    except FileNotFoundError as e:
-        return f"文件不存在: {e}"
-    except Exception as e:
-        return f"复制文件失败: {e}"
+async def sandbox(action: str, local_path: str = None, container_path: str = None, context=None) -> str:
+    """Manage the Docker sandbox container."""
 
+    if action == "status":
+        try:
+            sandbox_module = _get_sandbox_module()
+            config = sandbox_module._get_sandbox_config()
+            sb = sandbox_module.get_sandbox()
+            is_running = sb.is_running()
 
-@registry.register(
-    name="sandbox_copy_from",
-    description="从 Docker 沙箱容器复制文件",
-    parameters={
-        "type": "object",
-        "properties": {
-            "container_path": {
-                "type": "string",
-                "description": "容器内文件路径"
-            },
-            "local_path": {
-                "type": "string",
-                "description": "本地目标路径"
-            }
-        },
-        "required": ["container_path", "local_path"]
-    }
-)
-async def sandbox_copy_from(
-    container_path: str,
-    local_path: str,
-    context=None
-) -> str:
-    """从沙箱复制文件"""
-    try:
+            status_lines = [
+                "=== Docker 沙箱状态 ===",
+                f"配置启用: {'是' if config.get('enabled') else '否'}",
+                f"容器运行: {'是' if is_running else '否'}",
+                f"镜像: {config.get('image')}",
+                f"内存限制: {config.get('memory_limit')}",
+                f"CPU 限制: {config.get('cpu_limit')}",
+                f"网络模式: {config.get('network')}",
+            ]
+            if is_running and sb.container:
+                status_lines.append(f"容器 ID: {sb.container.id[:12]}")
+            return "\n".join(status_lines)
+        except Exception as e:
+            return f"获取状态失败: {e}"
+
+    elif action == "stop":
         sandbox_module = _get_sandbox_module()
-        sandbox = sandbox_module.get_sandbox()
-        if not sandbox.is_running():
-            return "沙箱容器未运行，请先执行一条命令以自动启动"
-        await sandbox.copy_from(container_path, local_path)
-        return f"已从沙箱复制文件\n容器: {container_path}\n本地: {local_path}"
-    except FileNotFoundError as e:
-        return f"文件不存在: {e}"
-    except Exception as e:
-        return f"复制文件失败: {e}"
+        try:
+            sb = sandbox_module.get_sandbox()
+            if not sb.is_running():
+                return "沙箱容器未运行"
+            await sb.stop()
+            sandbox_module._sandbox_instance = None
+            return "沙箱容器已停止并清理"
+        except Exception as e:
+            return f"停止沙箱失败: {e}"
+
+    elif action == "copy_to":
+        if not local_path:
+            return "错误: copy_to 操作需要 local_path"
+        cp = container_path or "/workspace"
+        try:
+            sandbox_module = _get_sandbox_module()
+            sb = sandbox_module.get_sandbox()
+            if not sb.is_running():
+                return "沙箱容器未运行，请先执行一条命令以自动启动"
+            await sb.copy_to(local_path, cp)
+            return f"已复制文件到沙箱\n本地: {local_path}\n容器: {cp}"
+        except FileNotFoundError as e:
+            return f"文件不存在: {e}"
+        except Exception as e:
+            return f"复制文件失败: {e}"
+
+    elif action == "copy_from":
+        if not container_path:
+            return "错误: copy_from 操作需要 container_path"
+        if not local_path:
+            return "错误: copy_from 操作需要 local_path"
+        try:
+            sandbox_module = _get_sandbox_module()
+            sb = sandbox_module.get_sandbox()
+            if not sb.is_running():
+                return "沙箱容器未运行，请先执行一条命令以自动启动"
+            await sb.copy_from(container_path, local_path)
+            return f"已从沙箱复制文件\n容器: {container_path}\n本地: {local_path}"
+        except FileNotFoundError as e:
+            return f"文件不存在: {e}"
+        except Exception as e:
+            return f"复制文件失败: {e}"
+
+    else:
+        return f"错误: 未知 action '{action}'。可用: status, stop, copy_to, copy_from"

@@ -93,9 +93,12 @@ class AgentLoop:
         self._skills = skills  # 供 config_manager.reload_skills / subagent 使用
         skill_summaries = get_skill_summaries(skills)
         
-        # 初始化 DefaultAgent
+        # 初始化 DefaultAgent（从 config 读 prompt，若无则用默认）
+        agent_configs = self.config.get("agents", {})
+        default_prompt = agent_configs.get("default", {}).get("prompt")
         self.agents["default"] = DefaultAgent(
             llm_config=llm_config,
+            custom_prompt=default_prompt,
             skill_summaries=skill_summaries
         )
         
@@ -243,7 +246,7 @@ class AgentLoop:
             
             # 2. 保存用户消息（系统唤醒消息不保存，避免污染对话历史）
             if msg.channel != "system":
-                self.runtime.save_message(session_id, "user", msg.text)
+                self.runtime.save_message(session_id, "user", msg.text, images=msg.images if msg.images else None)
             
             # 3. 检查是否需要回复
             # 非 system 渠道且不期望回复（如群聊未被 @），跳过 Agent 处理

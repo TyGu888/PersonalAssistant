@@ -153,60 +153,87 @@ def _build_tool_context(agent_loop, person_id: str, child_session: str, msg_cont
     return tool_context
 
 
-# ===== Tools =====
+# ===== Merged Tool =====
 
 @registry.register(
-    name="agent_spawn",
+    name="agent",
     description=(
-        "Spawn a sub-agent to execute a task. "
-        "The sub-agent gets its own session, prompt, tools, and optionally a different LLM profile. "
-        "Use background=true for long tasks; use foreground (default) when you need the result immediately."
+        "Manage sub-agents for delegating tasks. "
+        "Actions: spawn (create new sub-agent), list (show all sub-agents), query (get status/result by run_id), "
+        "send (send message to running sub-agent), stop (cancel a sub-agent), history (read conversation history)."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "task": {
+            "action": {
                 "type": "string",
-                "description": "Task description sent as the user message to the sub-agent",
+                "enum": ["spawn", "list", "query", "send", "stop", "history"],
+                "description": "Action to perform"
             },
-            "prompt": {
-                "type": "string",
-                "description": "System prompt for the sub-agent. If omitted, a default sub-task prompt is used.",
-            },
-            "tools": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Tool names the sub-agent can use. If omitted, uses the default route's tools.",
-            },
-            "llm_profile": {
-                "type": "string",
-                "description": "LLM profile name from config.llm_profiles. If omitted, uses the main agent's active profile.",
-            },
-            "max_iterations": {
-                "type": "integer",
-                "description": "Max tool-call iterations for the sub-agent",
-                "default": 30,
-            },
-            "timeout_seconds": {
-                "type": "integer",
-                "description": "Timeout in seconds",
-                "default": 300,
-            },
-            "background": {
-                "type": "boolean",
-                "description": "If true, run in background and return run_id immediately",
-                "default": False,
-            },
-            "label": {
-                "type": "string",
-                "description": "Human-readable label for tracking",
-            },
+            "task": {"type": "string", "description": "Task description (for spawn)"},
+            "prompt": {"type": "string", "description": "System prompt for sub-agent (for spawn, optional)"},
+            "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names (for spawn, optional)"},
+            "llm_profile": {"type": "string", "description": "LLM profile name (for spawn, optional)"},
+            "max_iterations": {"type": "integer", "description": "Max iterations (for spawn, default 30)"},
+            "timeout_seconds": {"type": "integer", "description": "Timeout (for spawn, default 300)"},
+            "background": {"type": "boolean", "description": "Run in background (for spawn, default false)"},
+            "label": {"type": "string", "description": "Human-readable label (for spawn)"},
+            "run_id": {"type": "string", "description": "Sub-agent run ID (for query/send/stop/history)"},
+            "message": {"type": "string", "description": "Message to send (for send)"},
+            "limit": {"type": "integer", "description": "Max messages (for history, default 10)"}
         },
-        "required": ["task"],
-    },
+        "required": ["action"]
+    }
 )
-async def agent_spawn(
-    task: str,
+async def agent(
+    action: str,
+    task: str = None,
+    prompt: str = None,
+    tools: list[str] = None,
+    llm_profile: str = None,
+    max_iterations: int = 30,
+    timeout_seconds: int = 300,
+    background: bool = False,
+    label: str = None,
+    run_id: str = None,
+    message: str = None,
+    limit: int = 10,
+    context=None,
+) -> str:
+    """Manage sub-agents for delegating tasks."""
+
+    if action == "spawn":
+        return await _agent_spawn(
+            task=task, prompt=prompt, tools=tools, llm_profile=llm_profile,
+            max_iterations=max_iterations, timeout_seconds=timeout_seconds,
+            background=background, label=label, context=context,
+        )
+    elif action == "list":
+        return await _agent_list(context=context)
+    elif action == "query":
+        if not run_id:
+            return "Error: query action requires run_id"
+        return await _agent_query(run_id=run_id, context=context)
+    elif action == "send":
+        if not run_id:
+            return "Error: send action requires run_id"
+        if not message:
+            return "Error: send action requires message"
+        return await _agent_send(run_id=run_id, message=message, context=context)
+    elif action == "stop":
+        if not run_id:
+            return "Error: stop action requires run_id"
+        return await _agent_stop(run_id=run_id, context=context)
+    elif action == "history":
+        if not run_id:
+            return "Error: history action requires run_id"
+        return await _agent_history(run_id=run_id, limit=limit, context=context)
+    else:
+        return f"Error: unknown action '{action}'. Available: spawn, list, query, send, stop, history"
+
+
+async def _agent_spawn(
+    task: str = None,
     prompt: str = None,
     tools: list[str] = None,
     llm_profile: str = None,
@@ -218,6 +245,9 @@ async def agent_spawn(
 ) -> str:
     if not context:
         return "Error: missing execution context"
+
+    if not task:
+        return "Error: spawn action requires task"
 
     agent_loop = context.get("agent_loop")
     if not agent_loop:
@@ -277,14 +307,14 @@ async def agent_spawn(
 
             if use_separate_agent:
                 agent_llm_config = _build_llm_config(agent_loop, llm_profile, max_iterations)
-                agent = BaseAgent(
+                agent_instance = BaseAgent(
                     agent_id=f"subagent-{run_id}",
                     system_prompt=effective_prompt,
                     llm_config=agent_llm_config,
                 )
             else:
-                agent = agent_loop.agents.get("default")
-                if not agent:
+                agent_instance = agent_loop.agents.get("default")
+                if not agent_instance:
                     raise RuntimeError("No default agent available")
 
             # Build msg_context for the child session
@@ -339,13 +369,13 @@ async def agent_spawn(
             if use_separate_agent:
                 # Separate BaseAgent already has the system prompt baked in
                 response = await asyncio.wait_for(
-                    agent.run(**run_kwargs),
+                    agent_instance.run(**run_kwargs),
                     timeout=timeout_seconds,
                 )
             else:
                 # Reuse default agent, override system prompt
                 response = await asyncio.wait_for(
-                    agent.run(**run_kwargs, system_prompt_override=effective_prompt),
+                    agent_instance.run(**run_kwargs, system_prompt_override=effective_prompt),
                     timeout=timeout_seconds,
                 )
 
@@ -380,24 +410,15 @@ async def agent_spawn(
             f"Sub-agent started in background.\n"
             f"  run_id: {run_id}\n"
             f"  label:  {run.label}\n"
-            f"Use agent_query(run_id=\"{run_id}\") to check progress, "
-            f"agent_stop(run_id=\"{run_id}\") to cancel."
+            f"Use agent(action=\"query\", run_id=\"{run_id}\") to check progress, "
+            f"agent(action=\"stop\", run_id=\"{run_id}\") to cancel."
         )
     else:
         result = await _execute()
         return f"[Sub-task completed] run_id={run_id}\n\n{result}"
 
 
-@registry.register(
-    name="agent_list",
-    description="List all sub-agents spawned in the current session, with status and result summaries.",
-    parameters={
-        "type": "object",
-        "properties": {},
-        "required": [],
-    },
-)
-async def agent_list(context=None) -> str:
+async def _agent_list(context=None) -> str:
     if not context:
         return "Error: missing execution context"
 
@@ -446,21 +467,7 @@ async def agent_list(context=None) -> str:
     return "\n".join(lines)
 
 
-@registry.register(
-    name="agent_query",
-    description="Get detailed status and result of a specific sub-agent by run_id.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "run_id": {
-                "type": "string",
-                "description": "The run_id of the sub-agent to query",
-            },
-        },
-        "required": ["run_id"],
-    },
-)
-async def agent_query(run_id: str, context=None) -> str:
+async def _agent_query(run_id: str, context=None) -> str:
     if not context:
         return "Error: missing execution context"
 
@@ -493,30 +500,12 @@ async def agent_query(run_id: str, context=None) -> str:
     elif run.error:
         lines.append(f"\n--- Error ---\n{run.error}")
     elif run.status == "running":
-        lines.append("\nThe sub-agent is still running. Use agent_query again later to check.")
+        lines.append("\nThe sub-agent is still running. Use agent(action=\"query\") again later to check.")
 
     return "\n".join(lines)
 
 
-@registry.register(
-    name="agent_send",
-    description="Send a message to a running background sub-agent.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "run_id": {
-                "type": "string",
-                "description": "The run_id of the sub-agent",
-            },
-            "message": {
-                "type": "string",
-                "description": "Message to send",
-            },
-        },
-        "required": ["run_id", "message"],
-    },
-)
-async def agent_send(run_id: str, message: str, context=None) -> str:
+async def _agent_send(run_id: str, message: str, context=None) -> str:
     if not context:
         return "Error: missing execution context"
 
@@ -528,25 +517,11 @@ async def agent_send(run_id: str, message: str, context=None) -> str:
     return (
         f"Sub-agent {run_id} runs autonomously and does not accept mid-execution messages. "
         f"Its current status is: {run.status}.\n"
-        f"Use agent_query(run_id=\"{run_id}\") to check its progress or result."
+        f"Use agent(action=\"query\", run_id=\"{run_id}\") to check its progress or result."
     )
 
 
-@registry.register(
-    name="agent_stop",
-    description="Stop a running background sub-agent by cancelling its task.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "run_id": {
-                "type": "string",
-                "description": "The run_id of the sub-agent to stop",
-            },
-        },
-        "required": ["run_id"],
-    },
-)
-async def agent_stop(run_id: str, context=None) -> str:
+async def _agent_stop(run_id: str, context=None) -> str:
     if not context:
         return "Error: missing execution context"
 
@@ -558,26 +533,7 @@ async def agent_stop(run_id: str, context=None) -> str:
     return f"Sub-agent {run_id} has been cancelled."
 
 
-@registry.register(
-    name="agent_history",
-    description="Read the conversation history of a sub-agent run.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "run_id": {
-                "type": "string",
-                "description": "The run_id of the sub-agent",
-            },
-            "limit": {
-                "type": "integer",
-                "description": "Max number of messages to return",
-                "default": 10,
-            },
-        },
-        "required": ["run_id"],
-    },
-)
-async def agent_history(run_id: str, limit: int = 10, context=None) -> str:
+async def _agent_history(run_id: str, limit: int = 10, context=None) -> str:
     if not context:
         return "Error: missing execution context"
 

@@ -12,11 +12,11 @@ Started as a learning / tinkering project—keeping it **simple and approachable
 - **Gateway hub** — FastAPI + WebSocket; connects channel services and remote clients (CLI, Web UI)
 - **Multi-channel** — Discord, Telegram, Slack, Feishu (飞书), QQ, WeCom (企业微信), WebSocket CLI
 - **Plugin skills** — Agent loads `SKILL.md` on demand for role and task guidance
-- **Pluggable tools** — Scheduler, filesystem, shell (with Docker sandbox), web search, MCP (static + dynamic hot-plug), cross-channel messaging, memory search/add, Computer Use (GUI automation), config hot-reload
+- **Pluggable tools** — Merged action-based tools (fewer tools, same functionality): shell (with Docker sandbox), browser (Playwright), scheduler, memory, sub-agent, config, MCP, filesystem, web search, cross-channel messaging, Computer Use (GUI automation)
 - **Long-term memory** — Session history (SQLite), RAG (ChromaDB), cross-channel identity mapping
 - **Token control** — tiktoken-based counting and context truncation
-- **Multimodal** — Image handling and Vision API
-- **Computer Use** — GUI automation via `computer_action` (Hierarchical ReAct: agent issues high-level task → GroundingEngine autonomously screenshots, locates, clicks, types, verifies). Pluggable Vision backend (Qwen3VL default)
+- **Multimodal** — Image handling with Vision API; images persisted in session history and restored in context. Auto-detection of image paths from tool output (zero-intrusion: tools just return text with paths, framework auto-converts to base64 for LLM vision)
+- **Computer Use** — GUI automation via `computer_action` (Hierarchical ReAct: agent issues high-level task → GroundingEngine autonomously screenshots, locates, clicks, types, verifies). Pluggable Vision backend (Qwen3VL default). Low-level tools removed from agent — only GroundingEngine uses them internally
 - **Dynamic sub-agents** — Main agent spawns sub-agents on the fly with custom prompt, tools, and LLM profile; foreground (blocking) or background (async) with lifecycle management
 - **Runtime config** — Switch LLM profiles, reload skills, connect/disconnect MCP servers — all at runtime via tools
 - **Docker sandbox** — Isolated shell execution in containers
@@ -202,7 +202,7 @@ Enable in config: `sandbox.enabled: true`.
 
 **Static:** Configure MCP servers in `config.yaml` under `mcp.servers` — they connect at startup.
 
-**Dynamic:** The agent can connect/disconnect MCP servers at runtime via tools (`mcp_connect`, `mcp_disconnect`, `mcp_list`). Example: the agent decides it needs a GitHub server and connects it mid-conversation.
+**Dynamic:** The agent can connect/disconnect MCP servers at runtime via `mcp(action="connect/disconnect/list")`. Example: the agent decides it needs a GitHub server and connects it mid-conversation.
 
 ## License
 

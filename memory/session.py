@@ -45,18 +45,22 @@ class SessionStore:
     
     def _serialize_message(self, message: ChatMessage) -> dict:
         """序列化 ChatMessage 为字典（处理 datetime）"""
-        return {
+        data = {
             "role": message.role,
             "content": message.content,
             "timestamp": message.timestamp.isoformat()
         }
+        if message.images:
+            data["images"] = message.images
+        return data
     
     def _deserialize_message(self, data: dict) -> ChatMessage:
         """反序列化字典为 ChatMessage（处理 datetime）"""
         return ChatMessage(
             role=data["role"],
             content=data["content"],
-            timestamp=datetime.fromisoformat(data["timestamp"])
+            timestamp=datetime.fromisoformat(data["timestamp"]),
+            images=data.get("images", [])
         )
     
     def append(self, session_id: str, message: ChatMessage):

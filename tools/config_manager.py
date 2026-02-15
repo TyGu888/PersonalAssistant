@@ -54,103 +54,100 @@ def _cast_value(value: str):
 
 
 @registry.register(
-    name="config_get",
-    description="读取运行时配置值（dot-separated path，如 'llm.active', 'agent.max_iterations'）",
+    name="config",
+    description=(
+        "Runtime configuration management. "
+        "Actions: get (read config value), set (write config value, memory only), "
+        "switch_profile (change LLM profile), reload_skills (rescan skills directory)."
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "path": {
+            "action": {
                 "type": "string",
-                "description": "配置路径，dot-separated，如 'llm.active', 'agent.max_iterations', 'skills.dir'"
-            }
-        },
-        "required": ["path"]
-    }
-)
-async def config_get(path: str, context=None) -> str:
-    if context is None:
-        return "错误: 缺少上下文信息"
-
-    agent_loop = context.get("agent_loop")
-    if agent_loop is None:
-        return "错误: 无法获取 AgentLoop 实例"
-
-    value = _get_by_path(agent_loop.config, path)
-    if value is None:
-        return f"配置项 '{path}' 不存在"
-
-    return f"{path} = {value}"
-
-
-@registry.register(
-    name="config_set",
-    description="设置运行时配置值（仅内存生效，不写入 config.yaml）。对于 'llm.active' 等关键路径会触发副作用（如重建 Agent）",
-    parameters={
-        "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-                "description": "配置路径，dot-separated，如 'agent.max_iterations'"
+                "enum": ["get", "set", "switch_profile", "reload_skills"],
+                "description": "Action to perform"
             },
-            "value": {
-                "type": "string",
-                "description": "要设置的值（自动转换类型：int/float/bool/string）"
-            }
+            "path": {"type": "string", "description": "Config path, dot-separated (for get/set, e.g. 'llm.active')"},
+            "value": {"type": "string", "description": "Value to set (for set, auto-converts type)"},
+            "profile_name": {"type": "string", "description": "LLM profile name (for switch_profile)"}
         },
-        "required": ["path", "value"]
+        "required": ["action"]
     }
 )
-async def config_set(path: str, value: str, context=None) -> str:
-    if context is None:
-        return "错误: 缺少上下文信息"
+async def config(action: str, path: str = None, value: str = None, profile_name: str = None, context=None) -> str:
+    """Runtime configuration management."""
 
-    agent_loop = context.get("agent_loop")
-    if agent_loop is None:
-        return "错误: 无法获取 AgentLoop 实例"
+    if action == "get":
+        if not path:
+            return "错误: get 操作需要 path"
+        if context is None:
+            return "错误: 缺少上下文信息"
+        agent_loop = context.get("agent_loop")
+        if agent_loop is None:
+            return "错误: 无法获取 AgentLoop 实例"
+        val = _get_by_path(agent_loop.config, path)
+        if val is None:
+            return f"配置项 '{path}' 不存在"
+        return f"{path} = {val}"
 
-    converted = _cast_value(value)
-    _set_by_path(agent_loop.config, path, converted)
-    logger.info(f"配置已更新: {path} = {converted}")
+    elif action == "set":
+        if not path:
+            return "错误: set 操作需要 path"
+        if value is None:
+            return "错误: set 操作需要 value"
+        if context is None:
+            return "错误: 缺少上下文信息"
+        agent_loop = context.get("agent_loop")
+        if agent_loop is None:
+            return "错误: 无法获取 AgentLoop 实例"
+        converted = _cast_value(value)
+        _set_by_path(agent_loop.config, path, converted)
+        logger.info(f"配置已更新: {path} = {converted}")
+        # 副作用：切换 llm.active 时重建 Agent
+        if path == "llm.active":
+            return await _apply_llm_switch(agent_loop, str(converted))
+        # 副作用：computer_use 配置变更时重新初始化
+        if path.startswith("computer_use."):
+            return _apply_computer_use_reinit(agent_loop, path, converted)
+        return f"已设置 {path} = {converted}（仅运行时生效）"
 
-    # 副作用：切换 llm.active 时重建 Agent
-    if path == "llm.active":
-        return await _apply_llm_switch(agent_loop, str(converted))
+    elif action == "switch_profile":
+        if not profile_name:
+            return "错误: switch_profile 操作需要 profile_name"
+        if context is None:
+            return "错误: 缺少上下文信息"
+        agent_loop = context.get("agent_loop")
+        if agent_loop is None:
+            return "错误: 无法获取 AgentLoop 实例"
+        # 验证 profile 存在
+        profiles = agent_loop.config.get("llm_profiles", {})
+        if profile_name not in profiles:
+            available = ", ".join(profiles.keys())
+            return f"错误: Profile '{profile_name}' 不存在。可用: {available}"
+        # 更新配置
+        agent_loop.config.setdefault("llm", {})["active"] = profile_name
+        return await _apply_llm_switch(agent_loop, profile_name)
 
-    return f"已设置 {path} = {converted}（仅运行时生效）"
+    elif action == "reload_skills":
+        return await _reload_skills(context=context)
+
+    else:
+        return f"错误: 未知 action '{action}'。可用: get, set, switch_profile, reload_skills"
 
 
-@registry.register(
-    name="switch_llm_profile",
-    description="切换 LLM Profile（如从 ark_doubao 切换到 deepseek_chat），会重建 DefaultAgent",
-    parameters={
-        "type": "object",
-        "properties": {
-            "profile_name": {
-                "type": "string",
-                "description": "目标 Profile 名称（需在 config.yaml 的 llm_profiles 中定义）"
-            }
-        },
-        "required": ["profile_name"]
-    }
-)
-async def switch_llm_profile(profile_name: str, context=None) -> str:
-    if context is None:
-        return "错误: 缺少上下文信息"
-
-    agent_loop = context.get("agent_loop")
-    if agent_loop is None:
-        return "错误: 无法获取 AgentLoop 实例"
-
-    # 验证 profile 存在
-    profiles = agent_loop.config.get("llm_profiles", {})
-    if profile_name not in profiles:
-        available = ", ".join(profiles.keys())
-        return f"错误: Profile '{profile_name}' 不存在。可用: {available}"
-
-    # 更新配置
-    agent_loop.config.setdefault("llm", {})["active"] = profile_name
-
-    return await _apply_llm_switch(agent_loop, profile_name)
+def _apply_computer_use_reinit(agent_loop, path: str, value) -> str:
+    """computer_use 配置变更后重新初始化"""
+    try:
+        from tools.computer_use import init_computer_use
+        init_computer_use(agent_loop.config)
+        enabled = agent_loop.config.get("computer_use", {}).get("enabled", False)
+        status = "已初始化" if enabled else "已禁用"
+        logger.info(f"Computer Use reinit: {status}")
+        return f"已设置 {path} = {value} — Computer Use {status}"
+    except Exception as e:
+        logger.warning(f"Computer Use reinit failed: {e}")
+        return f"已设置 {path} = {value}（Computer Use 重新初始化失败: {e}）"
 
 
 async def _apply_llm_switch(agent_loop, profile_name: str) -> str:
@@ -185,16 +182,8 @@ async def _apply_llm_switch(agent_loop, profile_name: str) -> str:
         return f"错误: 切换失败 - {e}"
 
 
-@registry.register(
-    name="reload_skills",
-    description="重新加载所有 Skills（从 skills/ 目录重新扫描 SKILL.md 文件，更新 Agent 的 Skill 清单）",
-    parameters={
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-)
-async def reload_skills(context=None) -> str:
+async def _reload_skills(context=None) -> str:
+    """Reload all skills from the skills/ directory."""
     if context is None:
         return "错误: 缺少上下文信息"
 

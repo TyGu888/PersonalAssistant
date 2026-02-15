@@ -1,6 +1,6 @@
 # Personal Agent Hub - 开发追踪
 
-> 最后更新: 2026-02-13
+> 最后更新: 2026-02-15
 
 快速了解项目架构和开发进展。
 
@@ -58,17 +58,17 @@ personal_agent_hub/
 │   ├── slack_actions.py       # Slack 特定操作（Thread 回复/反应/置顶）
 │   ├── feishu_actions.py      # 飞书特定操作（回复/反应/置顶/建群）
 │   ├── qq_actions.py          # QQ 特定操作（反应/置顶）
-│   ├── scheduler.py           # 智能定时提醒（auto_continue）
+│   ├── scheduler.py           # 定时提醒 scheduler(action=add/list/cancel)
 │   ├── filesystem.py          # 文件操作（edit/find/grep，支持 skills/ 和 data/）
-│   ├── shell.py               # Shell 命令 + 持久化会话 + Docker 沙箱管理
+│   ├── shell.py               # run_command + shell_session(action=...) + sandbox(action=...)
 │   ├── web.py                 # 网页搜索 / 抓取
 │   ├── image.py               # 图片处理 (Pillow)
 │   ├── sandbox.py             # Docker 沙箱基础设施（DockerSandbox 类，无工具注册）
 │   ├── mcp_client.py          # MCP 协议客户端
-│   ├── memory.py              # 记忆工具（search/add）
-│   ├── subagent.py            # 动态 Sub-Agent 系统（agent_spawn/list/query/stop/history）
-│   ├── config_manager.py      # 运行时配置热更新（config_get/set、switch_llm_profile、reload_skills）
-│   ├── mcp_tools.py           # MCP 动态热插拔（mcp_connect/disconnect/list）
+│   ├── memory.py              # memory(action=search/add)
+│   ├── subagent.py            # agent(action=spawn/list/query/send/stop/history)
+│   ├── config_manager.py      # config(action=get/set/switch_profile/reload_skills)
+│   ├── mcp_tools.py           # mcp(action=connect/disconnect/list)
 │   ├── computer_use.py        # Computer Use 工具注册（computer_action + 低层 GUI 工具）
 │   └── computer/              # Computer Use 内部模块
 │       ├── actions.py         # ActionBackend（PyAutoGUI/screencapture 封装）
@@ -150,7 +150,7 @@ AgentLoop
 | **gateway/server.py** | FastAPI 服务：POST /chat, WS /ws, 管理端点 |
 | **agent/loop.py** | Agent 事件驱动主循环，从 Bus 取消息，调用 Agent，分发回复 |
 | **agent/runtime.py** | Agent 运行时：持有 MemoryManager，加载上下文，身份解析 |
-| **agent/base.py** | BaseAgent：LLM 调用 + Tool 执行 + Token 管理 + 多模态 |
+| **agent/base.py** | BaseAgent：LLM 调用 + Tool 执行 + Token 管理 + 多模态 + Tool result 图片自动检测 |
 | **agent/default.py** | DefaultAgent：通用助手，Skill 清单注入 |
 | **channels/base.py** | Channel 基类：publish_message() (fire-and-forget) + deliver(target, msg) + ReconnectMixin |
 | **channels/slack.py** | Slack Bot (Socket Mode + AsyncApp) |
@@ -160,17 +160,18 @@ AgentLoop
 | **channels/wecom_crypto.py** | 企业微信消息加解密 (WXBizMsgCrypt) |
 | **tools/channel.py** | send_message 工具：Agent 主动向任意 Channel 发消息 |
 | **tools/registry.py** | Tool 注册装饰器，支持本地函数和 MCP 工具 |
-| **tools/shell.py** | Shell 命令 (run_command + 持久化会话) + Docker 沙箱管理 (stop/status/copy) |
+| **tools/shell.py** | run_command（沙箱感知）+ shell_session(action=start/exec/stop/list) + sandbox(action=status/stop/copy_to/copy_from) |
 | **tools/sandbox.py** | Docker 沙箱基础设施（DockerSandbox 类），无工具注册，被 shell.py 调用 |
-| **tools/subagent.py** | 动态 Sub-Agent：agent_spawn（自定义 prompt/tools/model，前台+后台）、agent_list/query/stop/history |
-| **tools/config_manager.py** | 运行时配置热更新：config_get/set、switch_llm_profile、reload_skills |
-| **tools/mcp_tools.py** | MCP 动态热插拔：mcp_connect/disconnect/list（运行时连接/断开 MCP Server） |
+| **tools/browser.py** | browser(action=open/goto/click/fill/snapshot/screenshot/close)，Playwright 无头浏览器 |
+| **tools/subagent.py** | agent(action=spawn/list/query/send/stop/history)，动态 Sub-Agent |
+| **tools/config_manager.py** | config(action=get/set/switch_profile/reload_skills)，运行时配置热更新 |
+| **tools/mcp_tools.py** | mcp(action=connect/disconnect/list)，MCP 动态热插拔 |
 | **tools/slack_actions.py** | Slack Thread 回复、反应、置顶 |
 | **tools/feishu_actions.py** | 飞书消息回复、反应、置顶、建群 |
 | **tools/qq_actions.py** | QQ 表情反应、消息置顶 |
 | **tools/wecom_actions.py** | 企业微信回复、群发、上传/下载素材 |
 | **tools/wedrive.py** | 企业微信微盘：空间与文件 CRUD |
-| **tools/computer_use.py** | Computer Use 工具注册：computer_action（高层 GUI 任务）+ screenshot/gui_click/gui_type/gui_hotkey/gui_scroll（低层） |
+| **tools/computer_use.py** | Computer Use 工具注册：computer_action（高层 GUI 任务），低层工具不再注册给主 Agent |
 | **tools/computer/grounding.py** | GroundingEngine：自主 GUI 任务执行器，VisionAPIBackend 可插拔（默认 Qwen3VL） |
 | **tools/computer/actions.py** | ActionBackend：PyAutoGUI + screencapture 封装（点击/输入/快捷键/滚动/截图） |
 | **tools/computer/memory.py** | ActionMemory：滑动窗口截图 + 文本动作历史 + 关键快照 + 经验记录 |
@@ -285,15 +286,17 @@ agent:
 3. **按功能抽查**
    - 学习/复习 → DefaultAgent 加载 study_coach Skill
    - 搜索/网页 → web_search / fetch_url
-   - 执行/命令 → run_command, sandbox_*
-   - 提醒/定时 → scheduler_add/list/cancel
+   - 执行/命令 → run_command（沙箱感知）, shell_session, sandbox
+   - 浏览器 → browser(action=open/goto/snapshot/click/close)
+   - 提醒/定时 → scheduler(action=add/list/cancel)
+   - 记忆 → memory(action=search/add)
    - 跨渠道发消息 → send_message Tool
    - 项目管理 → DefaultAgent 加载 project_manager Skill
    - GUI 操作 → computer_action（需 pyautogui + Accessibility 权限）
-   - 子任务 → agent_spawn（前台/后台），agent_list/query/stop
-   - 切换模型 → switch_llm_profile
-   - 热加载 Skill → reload_skills
-   - 动态 MCP → mcp_connect/disconnect/list
+   - 子任务 → agent(action=spawn/list/query/stop)
+   - 切换模型 → config(action=switch_profile)
+   - 热加载 Skill → config(action=reload_skills)
+   - 动态 MCP → mcp(action=connect/disconnect/list)
 
 ### 路由规则
 
@@ -314,7 +317,7 @@ agent:
 | **Gateway** | app, bus, dispatcher, channel_manager, server | ✅ |
 | **Agent** | loop, runtime, base, default | ✅ |
 | **Channels** | Telegram, Discord, Slack, Feishu, QQ, WeCom (企业微信) | ✅ |
-| **Tools** | registry, channel, scheduler (含 SQLite 持久化), filesystem, shell (含沙箱管理), web, image, browser (Playwright), sandbox (基础设施), mcp_client, memory, wecom_actions, wedrive, computer_use (GUI 操作), subagent (动态 Sub-Agent), config_manager (配置热更新), mcp_tools (MCP 热插拔) | ✅ |
+| **Tools** | registry, channel, scheduler (合并 action-based), filesystem, shell (run_command + shell_session + sandbox，合并 action-based), web, image, browser (合并 action-based), sandbox (基础设施), mcp_client, memory (合并 action-based), wecom_actions, wedrive, computer_use (GUI 操作), subagent (合并为 agent action-based), config_manager (合并为 config action-based), mcp_tools (合并为 mcp action-based) | ✅ |
 | **Memory** | session, global_mem (scope + person_id), manager (Token 截断 + Identity Mapping) | ✅ |
 | **Skills** | loader (插件式), study_coach, coding_assistant, project_manager | ✅ |
 | **Worker** | agent_worker (使用 AgentRuntime), agent_client, pool, protocol | ✅ |
@@ -339,7 +342,9 @@ agent:
 - [x] Skills 插件式加载
 - [x] Token 精确计数与截断
 - [x] FastAPI + WebSocket Gateway
-- [] 多模态图片处理
+- [x] 多模态图片处理（图片持久化到会话历史 + 上下文恢复）
+- [x] Tool result 图片路径自动检测（零侵入：_extract_image_paths → 自动构建多模态 user message）
+- [x] Computer Use config_set 热重载（config_set computer_use.enabled=true 即时生效）
 - [] 持久化 Shell 会话
 - [] Docker 沙箱执行
 - [] MCP 协议接入
@@ -352,7 +357,7 @@ agent:
 - [x] Sub-Agent 系统（动态 spawn，自定义 prompt/tools/model，前台+后台模式）
 - [x] 运行时配置热更新（switch_llm_profile、reload_skills、config_get/set）
 - [x] MCP 动态热插拔（mcp_connect/disconnect/list）
-- [] Computer Use（GUI 操作：computer_action + 低层工具）
+- [] Computer Use（GUI 操作：computer_action，低层工具已移至 GroundingEngine 内部）
 - [x] send_message Tool（Agent 主动跨渠道发消息）
 - [x] CLI Client（WebSocket 连接 Gateway）
 - [x] Unified deliver pattern（Dispatcher → channel.deliver）
@@ -363,7 +368,7 @@ agent:
 
 ### 待测试
 
-- [x] Browser 工具 (browser_open/goto/click/fill/snapshot/close)
+- [x] Browser 工具 browser(action=open/goto/click/fill/snapshot/screenshot/close)
 - [ ] Discord Channel deliver 模式完整对话
 - [ ] Telegram Channel deliver 模式完整对话  
 - [ ] CLI Client WebSocket RPC 工具调用
@@ -404,6 +409,7 @@ agent:
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-02-15 | **工具合并 + 多模态修复 + Computer Use 精简 + run_command 增强**。(1) 工具大合并：29 个工具合并为 8 个（shell_session、sandbox、agent、config、mcp、scheduler、memory、browser 各合为一个 action-based 工具），减少 tool schema 占用 token，保留全部功能。(2) 多模态图片持久化：ChatMessage 支持 images 字段，图片路径存入 SQLite，加载上下文时自动重建 OpenAI Vision 格式（base64 转换在 LLM 调用时执行）。(3) **Tool result 图片自动检测**（零侵入）：`BaseAgent._extract_image_paths` 自动扫描 tool result 文本中的图片路径，存在则构建多模态 user message 塞给 LLM 查看——工具无需改签名，只要输出含路径就行。(4) **Computer Use 精简**：移除低层工具注册（screenshot/gui_click/gui_type/gui_hotkey/gui_scroll），主 Agent 只保留 `computer_action` 高层工具，低层操作由 GroundingEngine 内部直接调用 ActionBackend。简单截图推荐 `run_command(command='screencapture -x shot.png', use_sandbox=false)`。(5) **config_set 支持 Computer Use 热重载**：修改 `computer_use.*` 配置后自动调用 `init_computer_use` 重新初始化。`init_computer_use` 在 disable 时正确清理全局状态。(6) run_command 描述增强：Agent 现在明确知道沙箱状态、容器环境（/workspace）、use_sandbox 参数控制宿主机/沙箱切换。(7) config.yaml 中 agents.default.prompt 真正生效（修复 AgentLoop 未读取 config prompt 的 bug），删除死配置 agents.study_coach。 |
 | 2026-02-13 | **自适应框架演进：动态 Sub-Agent + 配置热更新 + MCP 热插拔**。(1) Sub-Agent 全面重写：主 Agent 即时定义 prompt/tools/model（不再依赖预定义 Skill），前台（阻塞）+ 后台（异步）模式，支持不同 LLM Profile，生命周期管理（agent_query/agent_stop）。(2) 运行时配置热更新：config_get/set（dot-path 读写）、switch_llm_profile（切换模型并重建 Agent）、reload_skills（重新扫描 SKILL.md 并更新 Agent）。(3) MCP 动态热插拔：mcp_connect/disconnect/list，Agent 可在对话中连接新 MCP Server 获得新能力。清理旧 run_subagent 死代码。 |
 | 2026-02-10 | **Computer Use (GUI 操作)**。Hierarchical ReAct 架构：主 Agent 发出高层 `computer_action` 指令，GroundingEngine 自主完成全部 GUI 子步骤（截图→VisionLLM 规划定位→PyAutoGUI 执行→验证）。6 个工具：computer_action（高层）+ screenshot/gui_click/gui_type/gui_hotkey/gui_scroll（低层）。Vision 后端可插拔（BaseVisionBackend，当前 VisionAPIBackend 默认 Qwen3VL，切换模型只改 config）。ActionMemory 四层记忆。依赖 pyautogui + pyperclip。设计文档：docs/ui-use-design.md。 |
 | 2026-02-09 | **WeCom (企业微信) Channel + WeDrive 微盘**。自建应用回调模式接入（HTTP GET/POST /wecom/callback，AES 加解密）；access_token 自动刷新；单聊/群聊收发消息 + 附件上传；wecom_actions 工具（回复/群发/素材上传下载）；wedrive 微盘工具集（空间列表/创建/重命名、文件列表/上传/下载/删除/移动/重命名）；依赖 pycryptodome。 |
@@ -494,7 +500,8 @@ pyperclip>=1.8.0
 | 动态 Prompt | 根据任务类型、用户历史动态生成 prompt（部分已实现：sub-agent 自定义 prompt） |
 | 插件系统 | Channel/Tool 作为独立包动态加载（部分已实现：MCP 动态热插拔） |
 | Web 前端 | 管理界面 + 对话 UI |
-Computer Use 增强：ShowUI 本地模型、Set-of-Mark 标注、macOS Accessibility、经验学习
+| Computer Use 增强 | ShowUI 本地模型、Set-of-Mark 标注、macOS Accessibility、经验学习 |
+| 泛化多模态 | `_extract_image_paths` → `_extract_media_paths`（支持 video/audio）；LLM Profile 增加 `modalities` 字段按模型能力过滤；`_build_user_message` 根据 media type 构建对应 content block（image_url / input_audio 等）；Gemini 原生 API 适配（inline_data parts） |
 
 ### 长期
 

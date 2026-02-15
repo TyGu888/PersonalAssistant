@@ -147,21 +147,19 @@ routing:
       create_file, read_file, list_files, append_file, delete_file, send_file, 
       edit_file, find_files, grep_files,
       # 网络 / 浏览器
-      web_search, fetch_url,
-      browser_open, browser_goto, browser_click, browser_fill, browser_snapshot, browser_screenshot, browser_close,
+      web_search, fetch_url, browser,
       # 定时提醒
-      scheduler_add, scheduler_list, scheduler_cancel,
+      scheduler,
       # Shell / 沙箱
-      run_command, shell_session_start, shell_session_exec, shell_session_stop, shell_session_list,
-      sandbox_stop, sandbox_copy_to, sandbox_copy_from, sandbox_status,
+      run_command, shell_session, sandbox,
       # 记忆
-      memory_search, memory_add,
+      memory,
       # Sub-Agent
-      agent_spawn, agent_list, agent_send, agent_history, agent_query, agent_stop,
+      agent,
       # Config 热更新
-      config_get, config_set, switch_llm_profile, reload_skills,
+      config,
       # MCP 动态热插拔
-      mcp_connect, mcp_disconnect, mcp_list,
+      mcp,
       # Channel (主动发消息 + 通讯录)
       send_message, get_contacts, contact_remove,
       # 企业微信 + 微盘
@@ -169,8 +167,8 @@ routing:
       wedrive_list_spaces, wedrive_space_info, wedrive_create_space, wedrive_rename_space,
       wedrive_list_files, wedrive_file_info, wedrive_create_folder, wedrive_upload_file,
       wedrive_download_file, wedrive_delete_file, wedrive_move_file, wedrive_rename_file,
-      # Computer Use (GUI 操作)
-      computer_action, screenshot, gui_click, gui_type, gui_hotkey, gui_scroll
+      # Computer Use (GUI 操作，低层工具已移至 GroundingEngine 内部)
+      computer_action
     ]
 
 # Computer Use 配置 (GUI 操作)
@@ -179,7 +177,7 @@ computer_use:
   vision_profile: qwen3_vl        # 指向 llm_profiles 中的 VL 模型，切换模型只改这里
   vision_backend: vision_api       # 目前支持: vision_api (未来: showui, accessibility)
   max_steps: 15                    # computer_action 默认最大步数
-  screenshot_dir: /tmp/agent_screenshots
+  screenshot_dir: data/screenshots
   action_wait: 0.3                 # 每步操作后等待 UI 更新的时间 (秒)
   memory:
     max_screenshots: 2             # 滑动窗口截图数量
@@ -220,17 +218,6 @@ mcp:
 
 # Agent 定义
 agents:
-  study_coach:
-    prompt: |
-      你是一个严厉但关心学生的学习教练。
-      督促用户学习，提醒完成任务。
-      
-      ## 处理定时任务触发
-      当收到 [定时任务触发] 开头的消息时：
-      1. 友好地提醒用户
-      2. 设置下一次提醒（scheduler_add，auto_continue=True）
-      3. 可选：设置1小时后的追问提醒（auto_continue=False）
-  
   default:
     prompt: |
       # 通用助手
@@ -253,32 +240,28 @@ agents:
 
       ## 工具使用指南
 
-      ### 命令执行 (run_command vs shell_session)
+      你的工具使用 action 参数来区分操作。核心工具：
+
+      ### 命令执行
       <important>
-      请根据任务类型选择正确的命令执行方式：
-      
-      1. **run_command**: 
-         - 用于执行单次、独立的简单命令（如 `ls`, `cat`, `grep`）。
-         - **注意**: 此工具**不保持状态**。`cd` 命令在下一次调用时会失效。
-      
-      2. **shell_session_*** (推荐用于复杂任务):
-         - 当需要执行一系列依赖上下文的命令时（如 `cd repo && make`, `export VAR=1 && ./run`）。
-         - **必须**先使用 `shell_session_start` 创建会话。
-         - 然后使用 `shell_session_exec` 执行命令。
-         - 这能保持工作目录 (cwd) 和环境变量 (env) 的状态，就像在真实终端中一样。
+      - **run_command**: 单次命令（不保持状态）。沙箱开启时默认在 Docker 容器执行，设 use_sandbox=false 可在宿主机执行。
+      - **shell_session(action="start/exec/stop/list")**: 持久化 Shell 会话，保持 cwd 和 env 状态。复杂任务推荐。
+      - **sandbox(action="status/stop/copy_to/copy_from")**: 管理 Docker 沙箱容器。
       </important>
 
-      ### 网络搜索 (web_search)
-      当用户询问实时信息、新闻、或你不确定的知识时使用。
+      ### 浏览器 (browser)
+      browser(action="open/goto/click/fill/snapshot/screenshot/close")
+      典型流程：open → goto → snapshot → click/fill → snapshot → close
 
-      ### 文件操作
-      当用户需要创建、读取或管理文件时使用。
-
-      ### 定时提醒
-      当用户需要设置提醒或查看/取消现有提醒时使用。
+      ### 其他工具
+      - **scheduler**(action="add/list/cancel"): 定时提醒
+      - **memory**(action="search/add"): 长期记忆
+      - **agent**(action="spawn/list/query/send/stop/history"): 子 Agent
+      - **config**(action="get/set/switch_profile/reload_skills"): 运行时配置
+      - **mcp**(action="connect/disconnect/list"): MCP 服务器管理
 
       ## 处理定时任务触发
       当收到 [定时任务触发] 开头的消息时：
       1. 友好地提醒用户该做的事
-      2. 设置下一次提醒（scheduler_add，auto_continue=True，默认明天同一时间）
-      3. 可选：设置1小时后的追问提醒（auto_continue=False）
+      2. 设置下一次提醒（scheduler(action="add")，auto_continue=true，默认明天同一时间）
+      3. 可选：设置1小时后的追问提醒（auto_continue=false）

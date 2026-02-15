@@ -44,19 +44,62 @@ async def _ensure_page():
 
 
 @registry.register(
-    name="browser_open",
-    description="启动无头浏览器（Chromium）。后续可用 browser_goto / browser_click / browser_snapshot / browser_screenshot 等。用完后请 browser_close。",
+    name="browser",
+    description=(
+        "Control a headless Chromium browser for web browsing, form filling, and page interaction. "
+        "Actions: open (start browser), goto (navigate to URL), click (click element), fill (fill form input), "
+        "snapshot (get page text content), screenshot (capture page image), close (release browser). "
+        "Typical flow: open -> goto -> snapshot/screenshot -> click/fill -> snapshot -> close."
+    ),
     parameters={
         "type": "object",
-        "properties": {},
-        "required": [],
-    },
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["open", "goto", "click", "fill", "snapshot", "screenshot", "close"],
+                "description": "Action to perform"
+            },
+            "url": {"type": "string", "description": "URL to navigate to (for goto)"},
+            "selector": {"type": "string", "description": "CSS selector or text=... locator (for click/fill/screenshot)"},
+            "value": {"type": "string", "description": "Text to fill (for fill)"}
+        },
+        "required": ["action"]
+    }
 )
-async def browser_open(context=None) -> str:
+async def browser(action: str, url: str = None, selector: str = None, value: str = None, context=None) -> str:
+    """Control a headless Chromium browser."""
+
+    if action == "open":
+        return await _browser_open()
+    elif action == "goto":
+        if not url:
+            return "错误: goto 操作需要 url"
+        return await _browser_goto(url)
+    elif action == "click":
+        if not selector:
+            return "错误: click 操作需要 selector"
+        return await _browser_click(selector)
+    elif action == "fill":
+        if not selector:
+            return "错误: fill 操作需要 selector"
+        if value is None:
+            return "错误: fill 操作需要 value"
+        return await _browser_fill(selector, value)
+    elif action == "snapshot":
+        return await _browser_snapshot()
+    elif action == "screenshot":
+        return await _browser_screenshot(selector)
+    elif action == "close":
+        return await _browser_close()
+    else:
+        return f"错误: 未知 action '{action}'。可用: open, goto, click, fill, snapshot, screenshot, close"
+
+
+async def _browser_open() -> str:
     """启动无头浏览器。若已打开则直接返回成功。"""
     global _browser, _context, _page, _playwright  # noqa: PLW0603
     if _page is not None:
-        return "浏览器已处于打开状态，可直接使用 browser_goto / browser_click 等。"
+        return "浏览器已处于打开状态，可直接使用 browser(action='goto') 等。"
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -67,96 +110,53 @@ async def browser_open(context=None) -> str:
         _context = await _browser.new_context()
         _context.set_default_timeout(DEFAULT_TIMEOUT_MS)
         _page = await _context.new_page()
-        return "浏览器已启动（无头模式）。可使用 browser_goto、browser_click、browser_fill、browser_snapshot、browser_screenshot，用完后 browser_close。"
+        return "浏览器已启动（无头模式）。可使用 goto、click、fill、snapshot、screenshot，用完后 close。"
     except Exception as e:
-        logger.error(f"browser_open failed: {e}", exc_info=True)
+        logger.error(f"browser open failed: {e}", exc_info=True)
         return f"启动浏览器失败: {str(e)}。请确认已执行: playwright install chromium"
 
 
-@registry.register(
-    name="browser_goto",
-    description="在已打开的浏览器中打开指定 URL。需先 browser_open。",
-    parameters={
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "要打开的完整 URL，如 https://example.com"}
-        },
-        "required": ["url"],
-    },
-)
-async def browser_goto(url: str, context=None) -> str:
+async def _browser_goto(url: str) -> str:
     """打开 URL"""
     if not await _ensure_page():
-        return "错误: 浏览器未打开，请先调用 browser_open。"
+        return "错误: 浏览器未打开，请先调用 browser(action='open')。"
     try:
         await _page.goto(url, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
         title = await _page.title()
         return f"已打开: {_page.url}\n标题: {title}"
     except Exception as e:
-        logger.error(f"browser_goto failed: {e}", exc_info=True)
+        logger.error(f"browser goto failed: {e}", exc_info=True)
         return f"打开页面失败: {str(e)}"
 
 
-@registry.register(
-    name="browser_click",
-    description="点击页面上的元素。selector 可为 CSS 选择器、或 text=按钮文字、或 [aria-label=...]。需先 browser_open 并已 browser_goto 到目标页。",
-    parameters={
-        "type": "object",
-        "properties": {
-            "selector": {"type": "string", "description": "元素选择器，如 'button'、'#submit'、'text=登录'"}
-        },
-        "required": ["selector"],
-    },
-)
-async def browser_click(selector: str, context=None) -> str:
+async def _browser_click(selector: str) -> str:
     """点击元素"""
     if not await _ensure_page():
-        return "错误: 浏览器未打开，请先调用 browser_open。"
+        return "错误: 浏览器未打开，请先调用 browser(action='open')。"
     try:
         await _page.click(selector, timeout=DEFAULT_TIMEOUT_MS)
         return f"已点击: {selector}"
     except Exception as e:
-        logger.error(f"browser_click failed: {e}", exc_info=True)
+        logger.error(f"browser click failed: {e}", exc_info=True)
         return f"点击失败: {str(e)}"
 
 
-@registry.register(
-    name="browser_fill",
-    description="在输入框内填入文字。selector 通常为 input 的 name、id 或 CSS 选择器。需先 browser_open 并已 browser_goto 到目标页。",
-    parameters={
-        "type": "object",
-        "properties": {
-            "selector": {"type": "string", "description": "输入框选择器，如 'input[name=q]'、'#search'"},
-            "value": {"type": "string", "description": "要填入的文字"}
-        },
-        "required": ["selector", "value"],
-    },
-)
-async def browser_fill(selector: str, value: str, context=None) -> str:
+async def _browser_fill(selector: str, value: str) -> str:
     """填表"""
     if not await _ensure_page():
-        return "错误: 浏览器未打开，请先调用 browser_open。"
+        return "错误: 浏览器未打开，请先调用 browser(action='open')。"
     try:
         await _page.fill(selector, value, timeout=DEFAULT_TIMEOUT_MS)
         return f"已在 {selector} 填入内容（共 {len(value)} 字）"
     except Exception as e:
-        logger.error(f"browser_fill failed: {e}", exc_info=True)
+        logger.error(f"browser fill failed: {e}", exc_info=True)
         return f"填表失败: {str(e)}"
 
 
-@registry.register(
-    name="browser_snapshot",
-    description="获取当前页面的文本快照（URL、标题、body 主要文本），供理解页面内容。内容过长会截断。需先 browser_open 并已 browser_goto。",
-    parameters={
-        "type": "object",
-        "properties": {},
-        "required": [],
-    },
-)
-async def browser_snapshot(context=None) -> str:
+async def _browser_snapshot() -> str:
     """获取当前页文本快照"""
     if not await _ensure_page():
-        return "错误: 浏览器未打开，请先调用 browser_open。"
+        return "错误: 浏览器未打开，请先调用 browser(action='open')。"
     try:
         title = await _page.title()
         url = _page.url
@@ -169,28 +169,14 @@ async def browser_snapshot(context=None) -> str:
             body = body[:SNAPSHOT_MAX_CHARS] + "\n...[已截断]"
         return f"URL: {url}\n标题: {title}\n\n--- 页面文本 ---\n{body}"
     except Exception as e:
-        logger.error(f"browser_snapshot failed: {e}", exc_info=True)
+        logger.error(f"browser snapshot failed: {e}", exc_info=True)
         return f"获取快照失败: {str(e)}"
 
 
-@registry.register(
-    name="browser_screenshot",
-    description="对当前页面截图（整页或指定元素），保存为 PNG，返回文件路径。用于“看”页面视觉内容。需先 browser_open 并已 browser_goto。",
-    parameters={
-        "type": "object",
-        "properties": {
-            "selector": {
-                "type": "string",
-                "description": "可选。不传则截整页；传则截该元素（CSS 选择器）。"
-            }
-        },
-        "required": [],
-    },
-)
-async def browser_screenshot(selector: Optional[str] = None, context=None) -> str:
+async def _browser_screenshot(selector: Optional[str] = None) -> str:
     """对当前页面或指定元素截图，保存到 data/screenshots/，返回路径。"""
     if not await _ensure_page():
-        return "错误: 浏览器未打开，请先调用 browser_open。"
+        return "错误: 浏览器未打开，请先调用 browser(action='open')。"
     try:
         os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -204,20 +190,11 @@ async def browser_screenshot(selector: Optional[str] = None, context=None) -> st
         abs_path = os.path.abspath(path)
         return f"截图已保存: {abs_path}\n（若需让模型看图，可将此路径作为图片输入。）"
     except Exception as e:
-        logger.error(f"browser_screenshot failed: {e}", exc_info=True)
+        logger.error(f"browser screenshot failed: {e}", exc_info=True)
         return f"截图失败: {str(e)}"
 
 
-@registry.register(
-    name="browser_close",
-    description="关闭无头浏览器并释放资源。用完后应调用以免占用内存。",
-    parameters={
-        "type": "object",
-        "properties": {},
-        "required": [],
-    },
-)
-async def browser_close(context=None) -> str:
+async def _browser_close() -> str:
     """关闭浏览器"""
     global _browser, _context, _page, _playwright  # noqa: PLW0603
     if _page is None:
@@ -235,7 +212,7 @@ async def browser_close(context=None) -> str:
         _page = None
         return "浏览器已关闭。"
     except Exception as e:
-        logger.error(f"browser_close failed: {e}", exc_info=True)
+        logger.error(f"browser close failed: {e}", exc_info=True)
         _page = None
         _context = None
         _browser = None

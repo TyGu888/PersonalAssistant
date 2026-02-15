@@ -68,12 +68,13 @@ class MemoryManager:
     
     # ===== Session 操作 =====
     
-    def save_message(self, session_id: str, role: str, content: str):
+    def save_message(self, session_id: str, role: str, content: str, images: list[str] = None):
         """保存消息到 Session"""
         message = ChatMessage(
             role=role,
             content=content,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.utcnow(),
+            images=images or []
         )
         self.session.append(session_id, message)
     

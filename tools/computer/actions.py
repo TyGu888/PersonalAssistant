@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class ActionBackend:
     """系统级鼠标键盘操作 + 截图"""
 
-    def __init__(self, screenshot_dir: str = "/tmp/agent_screenshots"):
+    def __init__(self, screenshot_dir: str = "data/screenshots"):
         self.platform = platform.system()  # "Darwin", "Linux", "Windows"
         self.screenshot_dir = screenshot_dir
         self._screenshot_counter = 0

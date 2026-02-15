@@ -14,35 +14,51 @@ logger = logging.getLogger(__name__)
 
 
 @registry.register(
-    name="mcp_connect",
-    description="Connect to an MCP server at runtime. Discovers and registers all tools provided by the server.",
+    name="mcp",
+    description=(
+        "Manage MCP (Model Context Protocol) servers at runtime. "
+        "Actions: connect (add MCP server and discover tools), disconnect (remove server), list (show all servers and tools)."
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "name": {"type": "string", "description": "Unique name for this MCP server"},
-            "command": {
+            "action": {
                 "type": "string",
-                "description": "Command to start the server (e.g. 'npx', 'python'). Required if url is not provided."
+                "enum": ["connect", "disconnect", "list"],
+                "description": "Action to perform"
             },
-            "args": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Command arguments (e.g. ['-y', '@modelcontextprotocol/server-filesystem', './data'])"
-            },
-            "env": {
-                "type": "object",
-                "description": "Environment variables for the server process. Supports ${VAR} syntax."
-            },
-            "url": {
-                "type": "string",
-                "description": "SSE URL for remote MCP server (not yet supported)"
-            }
+            "name": {"type": "string", "description": "MCP server name (for connect/disconnect)"},
+            "command": {"type": "string", "description": "Command to start server (for connect)"},
+            "args": {"type": "array", "items": {"type": "string"}, "description": "Command arguments (for connect)"},
+            "env": {"type": "object", "description": "Environment variables (for connect)"},
+            "url": {"type": "string", "description": "SSE URL (for connect, not yet supported)"}
         },
-        "required": ["name"]
+        "required": ["action"]
     }
 )
-async def mcp_connect(name: str, command: str = None, args: list = None,
-                      env: dict = None, url: str = None, context=None) -> str:
+async def mcp(action: str, name: str = None, command: str = None, args: list = None,
+              env: dict = None, url: str = None, context=None) -> str:
+    """Manage MCP servers at runtime."""
+
+    if action == "connect":
+        if not name:
+            return "Error: connect action requires name"
+        return await _mcp_connect(name=name, command=command, args=args, env=env, url=url)
+
+    elif action == "disconnect":
+        if not name:
+            return "Error: disconnect action requires name"
+        return await _mcp_disconnect(name=name)
+
+    elif action == "list":
+        return await _mcp_list()
+
+    else:
+        return f"Error: unknown action '{action}'. Available: connect, disconnect, list"
+
+
+async def _mcp_connect(name: str, command: str = None, args: list = None,
+                       env: dict = None, url: str = None) -> str:
     """Connect to an MCP server and register its tools."""
     from tools.mcp_client import MCPServer
 
@@ -81,18 +97,7 @@ async def mcp_connect(name: str, command: str = None, args: list = None,
         return f"Connected to MCP server '{name}', but no tools were discovered."
 
 
-@registry.register(
-    name="mcp_disconnect",
-    description="Disconnect from an MCP server and remove all its tools.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "name": {"type": "string", "description": "Name of the MCP server to disconnect"}
-        },
-        "required": ["name"]
-    }
-)
-async def mcp_disconnect(name: str, context=None) -> str:
+async def _mcp_disconnect(name: str) -> str:
     """Disconnect from an MCP server and unregister its tools."""
     from tools.mcp_client import mcp_manager
 
@@ -120,15 +125,7 @@ async def mcp_disconnect(name: str, context=None) -> str:
     return f"Disconnected MCP server '{name}'. Removed {len(removed)} tools."
 
 
-@registry.register(
-    name="mcp_list",
-    description="List all connected MCP servers and their available tools.",
-    parameters={
-        "type": "object",
-        "properties": {}
-    }
-)
-async def mcp_list(context=None) -> str:
+async def _mcp_list() -> str:
     """List all connected MCP servers and their tools."""
     from tools.mcp_client import mcp_manager
 

@@ -182,7 +182,9 @@ class ToolRegistry:
                 result = func(**args_dict)
             
             # 处理返回值
-            if result is None:
+            if isinstance(result, ToolResult):
+                return result  # Tool 直接返回 ToolResult 时透传
+            elif result is None:
                 output = ""
             elif isinstance(result, str):
                 output = result

@@ -78,7 +78,7 @@ class AgentRuntime:
         )
         return context
     
-    def save_message(self, session_id: str, role: str, content: str):
+    def save_message(self, session_id: str, role: str, content: str, images: list[str] = None):
         """
         保存消息到会话历史
         
@@ -86,8 +86,9 @@ class AgentRuntime:
         - session_id: 会话 ID
         - role: "user" | "assistant"
         - content: 消息内容
+        - images: 图片路径列表（可选）
         """
-        self.memory.save_message(session_id, role, content)
+        self.memory.save_message(session_id, role, content, images=images)
     
     def get_tool_schemas(self, tool_names: list[str]) -> list[dict]:
         """获取 Tool schemas"""

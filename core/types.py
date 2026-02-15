@@ -63,6 +63,7 @@ class ChatMessage:
     role: str                 # "user" | "assistant" | "system"
     content: str
     timestamp: datetime = field(default_factory=datetime.utcnow)
+    images: list[str] = field(default_factory=list)  # image file paths or data URLs
 
 @dataclass
 class MemoryItem:
