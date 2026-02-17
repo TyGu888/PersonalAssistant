@@ -69,7 +69,7 @@ personal_agent_hub/
 │   ├── subagent.py            # agent(action=spawn/list/query/send/stop/history)
 │   ├── config_manager.py      # config(action=get/set/switch_profile/reload_skills)
 │   ├── mcp_tools.py           # mcp(action=connect/disconnect/list)
-│   ├── computer_use.py        # Computer Use 工具注册（computer_action + 低层 GUI 工具）
+│   ├── computer_use.py        # Computer Use 工具注册（computer_action，实验性/未测试）
 │   └── computer/              # Computer Use 内部模块
 │       ├── actions.py         # ActionBackend（PyAutoGUI/screencapture 封装）
 │       ├── memory.py          # ActionMemory（滑动窗口截图 + 文本动作历史）
@@ -150,7 +150,7 @@ AgentLoop
 | **gateway/server.py** | FastAPI 服务：POST /chat, WS /ws, 管理端点 |
 | **agent/loop.py** | Agent 事件驱动主循环，从 Bus 取消息，调用 Agent，分发回复 |
 | **agent/runtime.py** | Agent 运行时：持有 MemoryManager，加载上下文，身份解析 |
-| **agent/base.py** | BaseAgent：LLM 调用 + Tool 执行 + Token 管理 + 多模态 + Tool result 图片自动检测 |
+| **agent/base.py** | BaseAgent：LLM 调用 + Tool 执行 + Token 管理 + 全模态媒体管道（图片/音频/视频，Provider 感知 content block） + Tool result 媒体路径自动检测 |
 | **agent/default.py** | DefaultAgent：通用助手，Skill 清单注入 |
 | **channels/base.py** | Channel 基类：publish_message() (fire-and-forget) + deliver(target, msg) + ReconnectMixin |
 | **channels/slack.py** | Slack Bot (Socket Mode + AsyncApp) |
@@ -171,10 +171,10 @@ AgentLoop
 | **tools/qq_actions.py** | QQ 表情反应、消息置顶 |
 | **tools/wecom_actions.py** | 企业微信回复、群发、上传/下载素材 |
 | **tools/wedrive.py** | 企业微信微盘：空间与文件 CRUD |
-| **tools/computer_use.py** | Computer Use 工具注册：computer_action（高层 GUI 任务），低层工具不再注册给主 Agent |
-| **tools/computer/grounding.py** | GroundingEngine：自主 GUI 任务执行器，VisionAPIBackend 可插拔（默认 Qwen3VL） |
-| **tools/computer/actions.py** | ActionBackend：PyAutoGUI + screencapture 封装（点击/输入/快捷键/滚动/截图） |
-| **tools/computer/memory.py** | ActionMemory：滑动窗口截图 + 文本动作历史 + 关键快照 + 经验记录 |
+| **tools/computer_use.py** | Computer Use 工具注册：computer_action（高层 GUI 任务），低层工具不再注册给主 Agent。**实验性，未经端到端测试** |
+| **tools/computer/grounding.py** | GroundingEngine：自主 GUI 任务执行器，VisionAPIBackend 可插拔（默认 Qwen3VL）。注意：`_prepare_screenshot` 硬依赖 `pyautogui.size()` |
+| **tools/computer/actions.py** | ActionBackend：PyAutoGUI + screencapture 封装（点击/输入/快捷键/滚动/截图）。需 macOS Accessibility 权限 |
+| **tools/computer/memory.py** | ActionMemory：滑动窗口截图 + 文本动作历史。关键快照和经验记录已实现但未集成使用 |
 | **cli_client/client.py** | WebSocket CLI 客户端，类 Claude Code 风格 |
 | **worker/agent_worker.py** | Worker 进程，使用 AgentRuntime 替代直接 MemoryManager |
 | **core/types.py** | 共享类型：IncomingMessage, OutgoingMessage, MessageEnvelope |
@@ -343,7 +343,7 @@ agent:
 - [x] Token 精确计数与截断
 - [x] FastAPI + WebSocket Gateway
 - [x] 多模态图片处理（图片持久化到会话历史 + 上下文恢复）
-- [x] Tool result 图片路径自动检测（零侵入：_extract_image_paths → 自动构建多模态 user message）
+- [x] Tool result 媒体路径自动检测（零侵入：_extract_media_paths 自动扫描图片/音频/视频路径 → 按 provider 构建对应 content block）
 - [x] Computer Use config_set 热重载（config_set computer_use.enabled=true 即时生效）
 - [] 持久化 Shell 会话
 - [] Docker 沙箱执行
@@ -357,7 +357,7 @@ agent:
 - [x] Sub-Agent 系统（动态 spawn，自定义 prompt/tools/model，前台+后台模式）
 - [x] 运行时配置热更新（switch_llm_profile、reload_skills、config_get/set）
 - [x] MCP 动态热插拔（mcp_connect/disconnect/list）
-- [] Computer Use（GUI 操作：computer_action，低层工具已移至 GroundingEngine 内部）
+- [ ] Computer Use（GUI 操作：computer_action。**实验性，不可用**——见已知问题。低层工具已移至 GroundingEngine 内部）
 - [x] send_message Tool（Agent 主动跨渠道发消息）
 - [x] CLI Client（WebSocket 连接 Gateway）
 - [x] Unified deliver pattern（Dispatcher → channel.deliver）
@@ -383,8 +383,8 @@ agent:
 - [ ] WeDrive 微盘工具测试（需后台开启微盘 API 权限）
 - [ ] Contact Registry 启动扫描验证
 - [ ] 周期性唤醒通讯录可见性验证
-- [ ] Computer Use: computer_action 完整 GUI 任务执行（需 pyautogui + Accessibility 权限）
-- [ ] Computer Use: screenshot / gui_click / gui_type 低层工具
+- [ ] Computer Use: computer_action 完整 GUI 任务执行（需 pyautogui + Accessibility 权限，当前不可用）
+- [ ] ~~Computer Use: screenshot / gui_click / gui_type 低层工具~~ 已移至 GroundingEngine 内部，不再单独注册
 - [ ] Computer Use: Qwen3VL Vision API 定位精度验证
 - [ ] Sub-Agent: agent_spawn 前台模式完整执行（含 tool 调用）
 - [ ] Sub-Agent: agent_spawn background=true + agent_query/agent_stop 生命周期
@@ -402,6 +402,7 @@ agent:
 | 同渠道多会话并发 | Slack 已按 thread_id 隔离 session；若多 thread 同时进消息会串行处理。如需严格串行可按 channel+thread 加锁（未实现）。 |
 | Ctrl+C 时 posthog atexit 报错 | 本仓库未依赖 posthog；若出现多为 IDE/环境注入。可在 main 的 signal 处理里忽略 atexit 阶段的 KeyboardInterrupt（按需）。 |
 | PPT 自我审查单次请求极慢（400s+） | 若一次性把多张预览图塞进一次 LLM 请求，请求体巨大，接口会极慢。Skill 已改为「只选 1～3 张关键页」做 Vision 审查；另可把 `agent.llm_call_timeout` 从 600 调低到 180～300，避免单轮等太久。 |
+| **Computer Use 不可用** | 实验性功能，从未端到端测试。已知问题：(1) `_prepare_screenshot` 硬依赖 `pyautogui.size()` 获取逻辑分辨率，Vision 规划步也需要 pyautogui + Accessibility 权限，不仅仅是 action 执行。(2) 无依赖/权限校验：init 时不检查 pyautogui/pyperclip 可用性和 macOS Accessibility，运行时才报错。(3) `computer_action` 工具始终注册（即使 `enabled=false`），LLM 可能尝试调用后得到 RuntimeError。(4) Vision API `max_tokens=400` 硬编码可能限制复杂推理。(5) ActionMemory 的 key_snapshots 和 experience 已实现但未集成使用。 |
 
 ---
 
@@ -409,9 +410,10 @@ agent:
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-02-15 | **全模态媒体管道（音频/视频/图片）**。(1) `_extract_image_paths` → `_extract_media_paths`：自动检测 tool result 中的图片/音频/视频文件路径（`.wav`/`.mp3`/`.mp4` 等），按扩展名分类。(2) `_build_user_message` 泛化：接受 `images`/`audio`/`video` 参数，根据 `media_format` 构建 provider 对应的 content block。(3) Provider 感知的 media block builder：OpenAI 用 `input_audio`，火山引擎用 `video_url`，不支持的模态自动插入文本提示（Agent 可通过 `run_command` 自行处理）。(4) `media_format` 字段加入 `llm_profiles`（`"openai"` 默认 / `"volcengine"`），通过 `AgentLoop._get_llm_config` 和 `subagent._build_llm_config` 传透。(5) 20MB inline 大小限制保护，超限文件跳过 base64 编码。 |
 | 2026-02-15 | **工具合并 + 多模态修复 + Computer Use 精简 + run_command 增强**。(1) 工具大合并：29 个工具合并为 8 个（shell_session、sandbox、agent、config、mcp、scheduler、memory、browser 各合为一个 action-based 工具），减少 tool schema 占用 token，保留全部功能。(2) 多模态图片持久化：ChatMessage 支持 images 字段，图片路径存入 SQLite，加载上下文时自动重建 OpenAI Vision 格式（base64 转换在 LLM 调用时执行）。(3) **Tool result 图片自动检测**（零侵入）：`BaseAgent._extract_image_paths` 自动扫描 tool result 文本中的图片路径，存在则构建多模态 user message 塞给 LLM 查看——工具无需改签名，只要输出含路径就行。(4) **Computer Use 精简**：移除低层工具注册（screenshot/gui_click/gui_type/gui_hotkey/gui_scroll），主 Agent 只保留 `computer_action` 高层工具，低层操作由 GroundingEngine 内部直接调用 ActionBackend。简单截图推荐 `run_command(command='screencapture -x shot.png', use_sandbox=false)`。(5) **config_set 支持 Computer Use 热重载**：修改 `computer_use.*` 配置后自动调用 `init_computer_use` 重新初始化。`init_computer_use` 在 disable 时正确清理全局状态。(6) run_command 描述增强：Agent 现在明确知道沙箱状态、容器环境（/workspace）、use_sandbox 参数控制宿主机/沙箱切换。(7) config.yaml 中 agents.default.prompt 真正生效（修复 AgentLoop 未读取 config prompt 的 bug），删除死配置 agents.study_coach。 |
 | 2026-02-13 | **自适应框架演进：动态 Sub-Agent + 配置热更新 + MCP 热插拔**。(1) Sub-Agent 全面重写：主 Agent 即时定义 prompt/tools/model（不再依赖预定义 Skill），前台（阻塞）+ 后台（异步）模式，支持不同 LLM Profile，生命周期管理（agent_query/agent_stop）。(2) 运行时配置热更新：config_get/set（dot-path 读写）、switch_llm_profile（切换模型并重建 Agent）、reload_skills（重新扫描 SKILL.md 并更新 Agent）。(3) MCP 动态热插拔：mcp_connect/disconnect/list，Agent 可在对话中连接新 MCP Server 获得新能力。清理旧 run_subagent 死代码。 |
-| 2026-02-10 | **Computer Use (GUI 操作)**。Hierarchical ReAct 架构：主 Agent 发出高层 `computer_action` 指令，GroundingEngine 自主完成全部 GUI 子步骤（截图→VisionLLM 规划定位→PyAutoGUI 执行→验证）。6 个工具：computer_action（高层）+ screenshot/gui_click/gui_type/gui_hotkey/gui_scroll（低层）。Vision 后端可插拔（BaseVisionBackend，当前 VisionAPIBackend 默认 Qwen3VL，切换模型只改 config）。ActionMemory 四层记忆。依赖 pyautogui + pyperclip。设计文档：docs/ui-use-design.md。 |
+| 2026-02-10 | **Computer Use (GUI 操作)**。Hierarchical ReAct 架构：主 Agent 发出高层 `computer_action` 指令，GroundingEngine 自主完成全部 GUI 子步骤（截图→VisionLLM 规划定位→PyAutoGUI 执行→验证）。低层工具后续已移至 GroundingEngine 内部（主 Agent 只保留 computer_action）。Vision 后端可插拔（BaseVisionBackend，当前 VisionAPIBackend 默认 Qwen3VL，切换模型只改 config）。ActionMemory 四层记忆。依赖 pyautogui + pyperclip。**注意：实验性功能，未经端到端测试。** |
 | 2026-02-09 | **WeCom (企业微信) Channel + WeDrive 微盘**。自建应用回调模式接入（HTTP GET/POST /wecom/callback，AES 加解密）；access_token 自动刷新；单聊/群聊收发消息 + 附件上传；wecom_actions 工具（回复/群发/素材上传下载）；wedrive 微盘工具集（空间列表/创建/重命名、文件列表/上传/下载/删除/移动/重命名）；依赖 pycryptodome。 |
 | 2026-02-07 | **Scheduler 持久化 + Browser 工具**。定时提醒使用 SQLite jobstore（data/scheduler.db），重启后任务保留；回调改为模块级 `run_scheduled_reminder` 以支持序列化。新增 browser_*（Playwright）：browser_open/goto/click/fill/snapshot/close，需 `playwright install chromium`。 |
 | 2026-02-07 | **Tool 清理 + Wake 机制修复**。禁用 subagent 工具（待迁移 MessageBus）；sandbox 工具合并到 shell.py（移除冗余 sandbox_exec/sandbox_start，sandbox.py 保留为纯基础设施）；修复周期性唤醒：不加载对话历史（防污染）、保留 memories、限制 max_iterations=3、跳过并发 wake、通讯录概要注入普通对话 |
@@ -492,7 +494,8 @@ pyperclip>=1.8.0
 | 后台进程管理 | process_start, process_list, process_kill |
 | 无头浏览器 | browser_* (Playwright)（已实现） |
 | Mac/iOS Client | 远程 Client 通过 WebSocket 执行本地操作 |
-
+记忆模块，夸channel/session记忆，全局记忆管理混乱
+定时/唤醒机制有bug
 ### 中期
 
 | 方向 | 说明 |
@@ -500,8 +503,8 @@ pyperclip>=1.8.0
 | 动态 Prompt | 根据任务类型、用户历史动态生成 prompt（部分已实现：sub-agent 自定义 prompt） |
 | 插件系统 | Channel/Tool 作为独立包动态加载（部分已实现：MCP 动态热插拔） |
 | Web 前端 | 管理界面 + 对话 UI |
-| Computer Use 增强 | ShowUI 本地模型、Set-of-Mark 标注、macOS Accessibility、经验学习 |
-| 泛化多模态 | `_extract_image_paths` → `_extract_media_paths`（支持 video/audio）；LLM Profile 增加 `modalities` 字段按模型能力过滤；`_build_user_message` 根据 media type 构建对应 content block（image_url / input_audio 等）；Gemini 原生 API 适配（inline_data parts） |
+| Computer Use 增强 | 先完成基础功能验证（依赖校验、权限检查、条件注册、端到端测试），再考虑增强：ShowUI 本地模型、Set-of-Mark 标注、macOS Accessibility API、经验学习 |
+| 泛化多模态（Phase 2） | Channel 层音频/视频附件下载 → `msg.attachments`；Gemini 原生 API 适配（inline_data parts，需 `GeminiClient` 抽象）；更多 `media_format` 支持（qwen 等） |
 
 ### 长期
 

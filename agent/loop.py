@@ -118,6 +118,8 @@ class AgentLoop:
                 "model": profile.get("model", "gpt-4o"),
                 "extra_params": profile.get("extra_params", {}),
                 "features": profile.get("features", {}),
+                "media_format": profile.get("media_format", "openai"),
+                "supports_vision": profile.get("supports_vision", True),
                 "profile_name": active_profile
             }
         else:
@@ -127,6 +129,8 @@ class AgentLoop:
                 "model": llm_cfg.get("model", "gpt-4o"),
                 "extra_params": llm_cfg.get("extra_params", {}),
                 "features": llm_cfg.get("features", {}),
+                "media_format": llm_cfg.get("media_format", "openai"),
+                "supports_vision": llm_cfg.get("supports_vision", True),
                 "profile_name": None
             }
         
@@ -354,15 +358,17 @@ class AgentLoop:
             
             attachments = tool_context.get("pending_attachments", [])
             
-            # 13. 检查 NO_REPLY
-            if response_text and "<NO_REPLY>" in response_text:
+            # 13. 检查 NO_REPLY（有 pending 附件时仍需投递）
+            if response_text and "<NO_REPLY>" in response_text and not attachments:
                 logger.debug(f"Agent returned NO_REPLY for {msg.user_id}")
                 response = OutgoingMessage(text="")
             else:
+                # 清除回复文本中的 NO_REPLY 标记（附件强制投递场景）
+                clean_text = response_text.replace("<NO_REPLY>", "").strip() if response_text else ""
                 # 14. 保存 assistant 回复（系统唤醒消息不保存）
-                if msg.channel != "system":
-                    self.runtime.save_message(session_id, "assistant", response_text)
-                response = OutgoingMessage(text=response_text, attachments=attachments)
+                if clean_text and msg.channel != "system":
+                    self.runtime.save_message(session_id, "assistant", clean_text)
+                response = OutgoingMessage(text=clean_text, attachments=attachments)
             
             # 15. 回复
             await self.dispatcher.dispatch_reply(envelope, response)

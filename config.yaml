@@ -2,24 +2,37 @@
 # 各 profile 可覆盖 agent 超时/重试：llm_call_timeout, llm_http_timeout, llm_max_retries（或 timeout, max_retries）
 llm_profiles:
   # 火山引擎方舟 (Doubao)
-  ark_doubao:
+  ark_doubao-seed2-pro:
     api_key: ${ARK_API_KEY}
     base_url: https://ark.cn-beijing.volces.com/api/v3
-    model: ep-20260128095801-jc4gx
+    model: ep-20260215211153-86rvm
+    media_format: volcengine  # volcengine: image_url + video_url
     extra_params:
       reasoning_effort: medium  # minimal|low|medium|high
-  
+
+  # 火山引擎方舟 (Doubao-code)
+  ark_doubao-seed2-code:
+    api_key: ${ARK_API_KEY}
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    model: ep-20260215215459-2xz66
+    media_format: volcengine
+    extra_params:
+      reasoning_effort: medium  # minimal|low|medium|high
+
+
   # DeepSeek Chat (普通对话)
   deepseek_chat:
     api_key: ${DEEPSEEK_API_KEY}
     base_url: https://api.deepseek.com
     model: deepseek-chat
+    supports_vision: false
   
   # DeepSeek Reasoner (R1 推理)
   deepseek_reasoner:
     api_key: ${DEEPSEEK_API_KEY}
     base_url: https://api.deepseek.com
     model: deepseek-reasoner
+    supports_vision: false
     features:
       preserve_reasoning_content: true  # 多轮对话保留 reasoning_content
   
@@ -28,6 +41,7 @@ llm_profiles:
     api_key: ${OPENAI_API_KEY}
     base_url: https://api.openai.com/v1
     model: gpt-4o
+    # media_format: openai  # 默认值，支持 image_url + input_audio
 
   # Qwen3 VL (Vision Language Model, 用于 Computer Use grounding)
   # 通过 Dashscope OpenAI-compatible API 或火山引擎等
@@ -38,7 +52,7 @@ llm_profiles:
 
 # 当前使用的 LLM Profile
 llm:
-  active: ark_doubao  # 切换这里即可换模型
+  active: ark_doubao-seed2-pro  # 切换这里即可换模型 (可选: ark_doubao-seed2-code, deepseek_chat, openai_gpt4o 等)
   max_context_tokens: 16000
   max_response_tokens: 8192
 

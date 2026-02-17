@@ -125,6 +125,8 @@ def _build_llm_config(agent_loop, profile_name: str, max_iterations: int) -> dic
         "model": profile.get("model", "gpt-4o"),
         "extra_params": profile.get("extra_params", {}),
         "features": profile.get("features", {}),
+        "media_format": profile.get("media_format", "openai"),
+        "supports_vision": profile.get("supports_vision", True),
         "max_context_tokens": llm_cfg.get("max_context_tokens", 8000),
         "max_response_tokens": llm_cfg.get("max_response_tokens"),
         "max_iterations": max_iterations,

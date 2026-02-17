@@ -3,8 +3,10 @@ from core.types import ChatMessage, ToolResult
 from tools.registry import registry
 from utils.token_counter import TokenCounter
 import asyncio
+import base64
 import json
 import logging
+import mimetypes
 import os
 import time
 from typing import Optional, Union
@@ -47,6 +49,15 @@ class BaseAgent:
         # Provider 特定配置
         self.extra_params = llm_config.get("extra_params", {})
         self.features = llm_config.get("features", {})
+        
+        # 媒体格式：决定 content block 的构建方式
+        # "openai" (默认): image_url + input_audio, 不支持 video
+        # "volcengine": image_url + video_url, 不支持 audio
+        self.media_format = llm_config.get("media_format", "openai")
+        
+        # 是否支持 Vision（image_url content block）
+        # DeepSeek 等纯文本模型不支持，需设为 false
+        self.supports_vision = llm_config.get("supports_vision", True)
         
         # 支持火山引擎等自定义 base_url
         client_kwargs = {"api_key": llm_config.get("api_key")}
@@ -202,12 +213,16 @@ class BaseAgent:
             # 将 tool 结果追加到 messages
             messages.extend(tool_messages)
             
-            # 自动检测 tool result 中的图片路径，塞给 LLM 查看
-            tool_images = self._extract_image_paths(tool_messages)
-            if tool_images:
+            # 自动检测 tool result 中的媒体文件路径，塞给 LLM 查看
+            media = self._extract_media_paths(tool_messages)
+            # Vision 不支持时跳过图片注入（避免发送 image_url block 到纯文本模型）
+            inject_images = media["images"] if self.supports_vision else None
+            if inject_images or media["audio"] or media["video"]:
                 messages.append(self._build_user_message(
-                    "[系统: 以下是工具产生的图片，请查看]",
-                    tool_images
+                    "[系统: 以下是工具产生的媒体文件，请查看]",
+                    images=inject_images or None,
+                    audio=media["audio"] or None,
+                    video=media["video"] or None,
                 ))
             
             iteration += 1
@@ -433,74 +448,115 @@ class BaseAgent:
         
         return messages
     
-    def _build_user_message(self, user_text: str, images: list[str] = None) -> dict:
+    def _build_user_message(self, user_text: str, images: list[str] = None,
+                            audio: list[str] = None, video: list[str] = None) -> dict:
         """
-        构建用户消息（支持图片）
+        构建用户消息（支持多模态：图片/音频/视频）
         
         参数:
         - user_text: 用户文本
-        - images: 图片列表，可以是:
-            - 文件路径 (如 "/path/to/image.jpg")
-            - data URL (如 "data:image/jpeg;base64,...")
+        - images: 图片列表（路径或 data URL）
+        - audio: 音频文件路径列表
+        - video: 视频文件路径列表
         
-        返回: OpenAI 消息格式
+        返回: OpenAI 消息格式（content 为 str 或 list[dict]）
         """
-        # 如果没有图片，返回纯文本格式
-        if not images:
-            return {
-                "role": "user",
-                "content": user_text
-            }
+        has_media = images or audio or video
+        if not has_media:
+            return {"role": "user", "content": user_text}
         
-        # 有图片，构建多模态消息
         content = []
-        
-        # 添加文本内容
         if user_text:
-            content.append({
-                "type": "text",
-                "text": user_text
-            })
+            content.append({"type": "text", "text": user_text})
         
-        # 添加图片
-        for image in images:
-            image_url = self._process_image_for_message(image)
-            if image_url:
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": image_url}
-                })
+        has_non_text = False
         
-        # 如果最终没有有效内容，返回纯文本
+        # 图片 — 所有 provider 都用 image_url
+        for img in (images or []):
+            block = self._build_image_block(img)
+            if block:
+                content.append(block)
+                has_non_text = True
+        
+        # Vision 不支持时，为跳过的图片添加文本提示
+        if images and not self.supports_vision:
+            content.append({"type": "text", "text": f"[此消息包含{len(images)}张图片，当前模型不支持图片输入]"})
+        
+        # 音频
+        for aud in (audio or []):
+            block = self._build_audio_block(aud)
+            if block:
+                content.append(block)
+                has_non_text = True
+            else:
+                content.append({"type": "text", "text": f"[音频文件: {aud}，当前模型不支持原生音频输入，可用 run_command 处理]"})
+        
+        # 视频
+        for vid in (video or []):
+            block = self._build_video_block(vid)
+            if block:
+                content.append(block)
+                has_non_text = True
+            else:
+                content.append({"type": "text", "text": f"[视频文件: {vid}，当前模型不支持原生视频输入，可用 run_command 处理]"})
+        
         if not content:
-            return {
-                "role": "user",
-                "content": user_text or ""
-            }
+            return {"role": "user", "content": user_text or ""}
         
-        return {
-            "role": "user",
-            "content": content
-        }
+        # 仅剩文本 block 时，折叠为纯字符串（兼容不支持 content list 的 provider）
+        if not has_non_text:
+            text_parts = [b["text"] for b in content if b.get("type") == "text"]
+            return {"role": "user", "content": "\n".join(text_parts)}
+        
+        return {"role": "user", "content": content}
+    
+    # ===== Media content block builders (provider-aware) =====
+    
+    def _build_image_block(self, image: str) -> Optional[dict]:
+        """构建图片 content block（所有 provider 通用 image_url 格式）"""
+        if not self.supports_vision:
+            return None
+        url = self._process_image_for_message(image)
+        if url:
+            return {"type": "image_url", "image_url": {"url": url}}
+        return None
+    
+    def _build_audio_block(self, audio_path: str) -> Optional[dict]:
+        """
+        构建音频 content block。
+        
+        OpenAI: {"type": "input_audio", "input_audio": {"data": base64, "format": "wav"}}
+        其他 provider 不支持时返回 None（调用方会插入文本提示）。
+        """
+        if self.media_format == "openai":
+            data = self._file_to_base64(audio_path)
+            if data is None:
+                return None
+            ext = os.path.splitext(audio_path)[1].lower().lstrip(".")
+            # OpenAI input_audio 支持 wav / mp3
+            fmt = ext if ext in ("wav", "mp3") else "wav"
+            return {"type": "input_audio", "input_audio": {"data": data, "format": fmt}}
+        return None
+    
+    def _build_video_block(self, video_path: str) -> Optional[dict]:
+        """
+        构建视频 content block。
+        
+        volcengine: {"type": "video_url", "video_url": {"url": data_url}}
+        其他 provider 不支持时返回 None。
+        """
+        if self.media_format == "volcengine":
+            url = self._file_to_data_url(video_path)
+            if url:
+                return {"type": "video_url", "video_url": {"url": url}}
+        return None
     
     def _process_image_for_message(self, image: str) -> Optional[str]:
-        """
-        处理图片，返回用于 LLM API 的 URL
-        
-        参数:
-        - image: 图片路径或 data URL
-        
-        返回: data URL 或 None（处理失败时）
-        """
-        # 如果已经是 data URL，直接返回
+        """处理图片，返回用于 LLM API 的 URL（data URL / HTTP URL）"""
         if image.startswith("data:"):
             return image
-        
-        # 如果是 HTTP URL，直接返回
         if image.startswith("http://") or image.startswith("https://"):
             return image
-        
-        # 否则认为是文件路径，处理并转换为 base64
         try:
             from tools.image import process_image_for_llm
             result = process_image_for_llm(image)
@@ -508,6 +564,31 @@ class BaseAgent:
         except Exception as e:
             logger.error(f"处理图片失败 {image}: {str(e)}")
             return None
+    
+    # ===== Media file helpers =====
+    
+    _MEDIA_MAX_SIZE = 20 * 1024 * 1024  # 20MB inline 上限
+    
+    def _file_to_base64(self, path: str) -> Optional[str]:
+        """读取文件并返回 base64 字符串。超过大小限制或失败时返回 None。"""
+        try:
+            size = os.path.getsize(path)
+            if size > self._MEDIA_MAX_SIZE:
+                logger.warning(f"媒体文件过大，跳过 inline: {path} ({size/(1024*1024):.1f}MB > {self._MEDIA_MAX_SIZE/(1024*1024):.0f}MB)")
+                return None
+            with open(path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+        except Exception as e:
+            logger.error(f"读取媒体文件失败 {path}: {e}")
+            return None
+    
+    def _file_to_data_url(self, path: str) -> Optional[str]:
+        """读取文件并返回 data URL（含 mime type）。"""
+        data = self._file_to_base64(path)
+        if data is None:
+            return None
+        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        return f"data:{mime};base64,{data}"
     
     def _compress_context(self, messages: list[dict], max_tokens: int) -> list[dict]:
         """
@@ -632,23 +713,34 @@ class BaseAgent:
         
         return tool_messages
     
-    _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+    # ===== Media path auto-detection from tool results =====
     
-    def _extract_image_paths(self, tool_messages: list[dict]) -> list[str]:
+    _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+    _AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma'}
+    _VIDEO_EXTS = {'.mp4', '.webm', '.mov', '.avi', '.mkv', '.flv', '.wmv'}
+    
+    def _extract_media_paths(self, tool_messages: list[dict]) -> dict:
         """
-        从 tool result text 中自动提取存在的图片文件路径。
+        从 tool result text 中自动提取存在的媒体文件路径。
         
         扫描每条 tool message 的 content，找出以 / 开头的绝对路径 token，
-        如果文件存在且是图片扩展名，收集起来。
+        按扩展名分类为 images / audio / video。
+        
+        返回: {"images": [...], "audio": [...], "video": [...]}
         """
-        images = []
+        media = {"images": [], "audio": [], "video": []}
         for msg in tool_messages:
             content = msg.get("content", "")
             if not content:
                 continue
-            # 按空格和换行拆 token，找绝对路径
             for token in content.replace("\n", " ").split():
-                if token.startswith("/") and os.path.splitext(token)[1].lower() in self._IMAGE_EXTS:
-                    if os.path.isfile(token):
-                        images.append(token)
-        return images
+                if not token.startswith("/"):
+                    continue
+                ext = os.path.splitext(token)[1].lower()
+                if ext in self._IMAGE_EXTS and os.path.isfile(token):
+                    media["images"].append(token)
+                elif ext in self._AUDIO_EXTS and os.path.isfile(token):
+                    media["audio"].append(token)
+                elif ext in self._VIDEO_EXTS and os.path.isfile(token):
+                    media["video"].append(token)
+        return media

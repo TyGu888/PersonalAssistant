@@ -179,6 +179,8 @@ curl -X POST http://localhost:8080/chat \
 
 ## Computer Use (GUI automation)
 
+> **Status: Experimental / Not production-ready.** The architecture is implemented but has never been tested end-to-end. See known issues below.
+
 Enable in config: `computer_use.enabled: true`. Requires:
 
 ```bash
@@ -186,9 +188,19 @@ pip install pyautogui pyperclip
 # macOS: System Settings → Privacy & Security → Accessibility → allow Terminal/Python
 ```
 
+You also need a Vision-capable LLM profile (e.g. `qwen3_vl`) configured with a valid API key (`DASHSCOPE_API_KEY`).
+
 The agent gets a `computer_action` tool that accepts natural-language GUI tasks (e.g. "open WeChat, find Zhang San, send message: meeting tomorrow"). Internally, the GroundingEngine loops autonomously: screenshot → VisionLLM plan+locate → PyAutoGUI execute → verify → repeat. The agent only sees a text result.
 
-Vision backend is pluggable — change `computer_use.vision_profile` in config to switch models (Qwen3VL, GPT-4o, Claude, etc.). See `docs/ui-use-design.md` for full architecture.
+Vision backend is pluggable — change `computer_use.vision_profile` in config to switch models (Qwen3VL, GPT-4o, Claude, etc.).
+
+### Known issues
+
+- **Hard pyautogui dependency in Vision path**: `_prepare_screenshot` calls `pyautogui.size()` to get logical screen resolution for Retina resize. This means the Vision planning step also fails without pyautogui + Accessibility permissions, not just action execution.
+- **No dependency/permission validation**: Missing pyautogui, pyperclip, or macOS Accessibility permissions are not checked at init time. Errors surface late at runtime with unhelpful messages.
+- **Tool always registered**: `computer_action` appears in the tool list even when `computer_use.enabled: false`. The LLM may attempt to use it and receive a generic `RuntimeError`.
+- **Untested**: The feature has never been validated end-to-end. Vision API coordinate accuracy, Retina handling, and multi-step task completion are all unverified.
+- **Hardcoded limits**: Vision API `max_tokens=400` may be too restrictive for complex reasoning.
 
 ## Docker sandbox
 

@@ -13,6 +13,8 @@ Channel Tools - Agent 主动通讯工具
 
 import json
 import logging
+import os
+from pathlib import Path
 from tools.registry import registry
 from core.types import OutgoingMessage
 
@@ -85,7 +87,16 @@ async def send_message(text: str, channel: str = None, channel_id: str = None, u
         target["user_id"] = user_id
     
     try:
-        message = OutgoingMessage(text=text, attachments=attachments or [])
+        # 将附件相对路径解析为绝对路径（相对于项目根目录）
+        resolved_attachments = []
+        if attachments:
+            project_root = Path(__file__).parent.parent.resolve()
+            for fp in attachments:
+                p = Path(fp)
+                if not p.is_absolute():
+                    p = (project_root / fp).resolve()
+                resolved_attachments.append(str(p))
+        message = OutgoingMessage(text=text, attachments=resolved_attachments)
         await dispatcher.send_to_channel(channel, target, message)
         extra = f", {len(attachments)} 个附件" if attachments else ""
         return f"消息已发送到 {channel} (target: channel_id={target.get('channel_id')}, user_id={target.get('user_id')}{extra})"

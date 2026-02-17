@@ -107,8 +107,7 @@ class VisionAPIBackend(BaseVisionBackend):
         action_history: str,
         step: int,
     ) -> StepPlan:
-        from tools.image import process_image_for_llm
-        img_data = process_image_for_llm(screenshot_path, max_dimension=1920, max_size_kb=1500)
+        img_data_url = self._prepare_screenshot(screenshot_path)
 
         prompt = self._build_prompt(task, action_history, step)
 
@@ -119,7 +118,7 @@ class VisionAPIBackend(BaseVisionBackend):
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": img_data["data_url"]}},
+                        {"type": "image_url", "image_url": {"url": img_data_url}},
                     ],
                 }],
                 max_tokens=400,
@@ -129,6 +128,47 @@ class VisionAPIBackend(BaseVisionBackend):
         except Exception as e:
             logger.error(f"VisionAPI call failed: {e}")
             return StepPlan(failed=True, fail_reason=f"VisionAPI error: {e}")
+
+    @staticmethod
+    def _prepare_screenshot(screenshot_path: str) -> str:
+        """
+        将截图 resize 到逻辑分辨率并编码为 data URL。
+
+        macOS Retina 截图是物理像素（2x 或 3x），但 PyAutoGUI 使用逻辑坐标。
+        必须把图片 resize 到逻辑分辨率，使 VisionLLM 返回的像素坐标
+        直接等于 PyAutoGUI 的逻辑坐标，不需要任何换算。
+
+        不能用 process_image_for_llm（它按 max_dimension 缩放，会破坏坐标对应关系）。
+        """
+        import io
+        import base64
+        from PIL import Image
+
+        img = Image.open(screenshot_path)
+        img.load()
+
+        # 获取逻辑屏幕尺寸
+        import pyautogui
+        logical_w, logical_h = pyautogui.size()
+
+        # resize 到逻辑分辨率（Retina 2x/3x → 1x）
+        if img.size != (logical_w, logical_h):
+            img = img.resize((logical_w, logical_h), Image.Resampling.LANCZOS)
+
+        # 转 RGB（JPEG 不支持 RGBA）
+        if img.mode != "RGB":
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode in ("RGBA", "LA", "P"):
+                if img.mode == "P":
+                    img = img.convert("RGBA")
+                bg.paste(img, mask=img.split()[-1])
+            img = bg
+
+        # JPEG 编码，质量尽量高但控制大小
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90, optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return f"data:image/jpeg;base64,{b64}"
 
     def _build_prompt(self, task: str, action_history: str, step: int) -> str:
         return f"""You are an autonomous GUI agent. You see a screenshot and must decide the next action to complete the given task.
